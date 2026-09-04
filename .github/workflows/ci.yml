@@ -1,0 +1,52 @@
+name: CI
+
+# 验证全部在云端跑，不需要你本机有 Flutter / Rust 工具链。
+# 用法：在 inksync 目录 `git init` → 推到 GitHub 仓库 → 本工作流自动运行。
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  flutter:
+    name: Flutter analyze & test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.0'
+          channel: stable
+      - name: flutter pub get
+        run: flutter pub get
+      # drift 代码生成（database.g.dart）—— 不跑这步 flutter analyze 会因缺生成类而红
+      - name: drift codegen (build_runner)
+        run: dart run build_runner build --delete-conflicting-outputs
+      - name: flutter analyze
+        run: flutter analyze
+      # drift 的 NativeDatabase（含 .memory()）在 Linux 上需要 sqlite3 原生库做 FFI
+      - name: 安装 sqlite3（跨端同步集成测试需要）
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+      - name: flutter test
+        run: flutter test
+      # 注意：flutter_rust_bridge codegen generate 暂未纳入。
+      # 当前 app 不 import 任何生成产物（native_bridge.dart 返回 null、_wire() 已注释），
+      # 故 analyze/test 无需它即可通过。待 M2 启用真实 Rust 绑定（打开 _wire()）时，
+      # 再加此步并补 flutter_rust_bridge.yaml 配置。
+
+  rust:
+    name: Rust core test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test (默认 features)
+        run: cargo test
+      # 沙箱曾用 nightly + rust-lld 绕过缺 mingw dlltool；CI(ubuntu) 有正常链接器，stable 即可。
+      # sync feature 需 C 工具链（cargo zigbuild），本作业未开，待 UOS 打包阶段在用户机验证。

@@ -1,0 +1,82 @@
+[package]
+name = "inksync_core"
+version = "0.1.0"
+edition = "2021"
+description = "格式解析 + WebDAV 同步原生核心（Android / Windows / UOS 三端共用）"
+
+[lib]
+# lib      : 供 cargo test / 作为普通 crate 使用
+# staticlib: Android (jniLibs)
+# cdylib   : Windows (.dll) / Linux (.so)
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[features]
+# 默认只编「格式解析 + HLC + 三方合并」（纯 Rust，沙箱可编译验证）。
+# 同步链路（reqwest->ring->getrandom）需要链接系统库（Windows 上需 mingw 全量
+# binutils / as.exe），故不进 default；在真机或带完整 mingw 的环境用
+# `cargo build --features sync` 开启。
+default = ["formats"]
+formats = []
+# 同步链路（reqwest/tokio/url/bytes）设为 optional，由 sync feature 启用。
+# 关键：非 optional 的 [dependencies] 在 `cargo build`（即使不带 --features sync）
+# 也会被无条件编译，从而把 windows-sys/ntdll/getrandom 全拉进来、触发 dlltool
+# 失败。只有 optional + feature 门控，默认构建才是纯 Rust、可用 Rust 自带导入库编过。
+sync = ["dep:reqwest", "dep:tokio", "dep:bytes", "dep:url"]
+# PDF 文本层抽取需要 pdfium 动态库，默认关闭以减小体积
+pdf-text = ["pdfium-render"]
+# flutter_rust_bridge 绑定（版本与 codegen 强相关，按需开启）
+frb = ["flutter_rust_bridge"]
+
+[dependencies]
+# ---- 通用 ----
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+once_cell = "1"
+regex = "1"
+sha2 = "0.10"
+hex = "0.4"
+# 注意：不要开 "v4" feature —— 它会拉入 getrandom，而 getrandom 在 Windows 上
+# 链接 bcryptprimitives.dll（Rust 自带导入库不含），会触发 dlltool 生成导入库、
+# 进而需要 mingw 的 as.exe。node id / change id 改用 `Uuid::from_u128(fastrand::u128())`
+# 生成（fastrand 纯 Rust，无需系统库）。此处保留 uuid 仅用于类型与 (反)序列化。
+uuid = { version = "1", default-features = false, features = ["std", "serde"] }
+# 注：核心代码只用 std::time；不引入外部 `time` crate（它的 Windows 高精度
+# 后端会链接 ntdll.dll，Rust 自带导入库不含，触发 dlltool 失败）。时间戳一律
+# 用 i64 毫秒（见 sync/hlc.rs 的 now_ms）。
+
+# ---- 格式解析 ----
+# zip：EPUB/CBZ 容器。必须关掉默认 features —— 默认的 zstd/bzip2/deflate(zlib)
+# 会拉入 C 编译（cc -> getrandom），而 getrandom 在 Windows 上链接
+# bcryptprimitives.dll（Rust 自带导入库不含），触发 dlltool 失败。
+# 改为纯 Rust 的 miniz_oxide 解压；flate2 单独声明以统一后端，避免任何
+# crate 偷偷启用 zlib（C 编译）。
+zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = { version = "1", default-features = false, features = ["miniz_oxide"] }
+roxmltree = "0.20"        # OPF / NCX / nav.xhtml / 207 响应解析
+encoding_rs = "0.8"       # GBK / Big5 / Shift_JIS / EUC-KR
+chardetng = "0.1"         # 编码嗅探（TXT）
+image = "0.25"            # 封面解码 / 缩放
+mobi = "0.8"              # MOBI / AZW3 (PalmDOC + HUFF-CDIC)；API 已对 docs.rs 0.8.0 核对
+pdfium-render = { version = "0.8", optional = true }
+
+# ---- 同步（optional，仅 --features sync 启用）----
+reqwest = { version = "0.12", default-features = false, optional = true, features = [
+    "blocking",
+    "rustls-tls",
+    "gzip",
+    "brotli",
+] }
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "time", "macros"] }
+bytes = { version = "1", optional = true }
+url = { version = "2", optional = true }
+
+# ---- FFI（可选） ----
+flutter_rust_bridge = { version = "2.0.0-dev.0", optional = true }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

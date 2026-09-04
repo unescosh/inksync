@@ -1,0 +1,35 @@
+# ── Dart / Flutter ──
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+.packages
+build/
+**/doc/api/
+*.log
+
+# ── Native build artifacts (Flutter 平台工程) ──
+android/.gradle/
+android/captures/
+.gradle/
+ios/Flutter/Debug/
+ios/Flutter/Release/
+ios/Flutter/ephemeral/
+macos/Flutter/ephemeral/
+*.keystore
+**/*.keystore
+**/android/**/*.keystore
+
+# ── Rust (core/) ──
+# 仓库内任何位置的 target/ 都忽略（含 core/target，之前的 /target 只匹配根目录，漏掉了它）
+target/
+**/*.rs.bk
+# 应用/库本体一致性：Cargo.lock 入库，保证 CI 可复现构建（apps 通常应提交）
+# Cargo.lock
+
+# ── 编辑器 / OS ──
+.idea/
+.vscode/
+*.iml
+.DS_Store

@@ -1,0 +1,60 @@
+name: inksync
+description: 三端同步的漫画/小说阅读器（Android / Windows 10 / 统信 UOS 20）
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # 状态管理
+  flutter_riverpod: ^2.5.1
+
+  # 本地数据库（Android / Windows / Linux 三端通用）
+  drift: ^2.18.0
+  sqlite3_flutter_libs: ^0.5.20
+  path_provider: ^2.1.3
+  path: ^1.9.0
+
+  # 网络（WebDAV 需要 PROPFIND / MKCOL / MOVE，用 dio 自定义 method）
+  dio: ^5.4.3+1
+
+  # 解析
+  crypto: ^3.0.3               # 书籍 sha256（内容寻址）
+  xml: ^6.5.0                  # WebDAV 207 Multi-Status 响应
+  collection: ^1.18.0
+  intl: ^0.19.0
+
+  # 阅读器
+  pdfrx: ^1.0.0            # PDF 渲染（Android / Windows / Linux 全支持）
+  flutter_rust_bridge: 2.0.0-dev.0
+
+  # 桌面端窗口管理（Windows / UOS）
+  window_manager: ^0.3.8
+  # 文件选择（Windows/Linux 走原生对话框，Android 走 SAF）
+  file_selector: ^1.0.3
+  # 安全存储凭据
+  flutter_secure_storage: ^9.2.2
+  # 跨端适配
+  device_info_plus: ^10.1.0
+  package_info_plus: ^8.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  drift_dev: ^2.18.0
+  build_runner: ^2.4.11
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/fonts/
+  fonts:
+    # 内置思源宋体子集，规避 UOS 精简版缺字 / Android ROM 字体不一致
+    - family: SourceHanSerif
+      fonts:
+        - asset: assets/fonts/SourceHanSerifSC-Subset.ttf

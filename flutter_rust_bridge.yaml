@@ -1,0 +1,19 @@
+# flutter_rust_bridge 配置
+# 版本必须与 pubspec 锁定的 `flutter_rust_bridge: 2.0.0-dev.0` 一致
+# （用 `dart pub global activate flutter_rust_bridge_codegen@2.0.0-dev.0` 安装同版本 codegen）。
+#
+# 本机执行：
+#   flutter_rust_bridge codegen generate
+# 会产出：
+#   - core/src/bridge_generated.rs   （Rust 侧胶水，需在 lib.rs 里 `mod bridge_generated;` 引入）
+#   - app/lib/bridge/bridge_generated.dart + bridge_definitions.dart
+# 生成的 Dart 入口类名默认取自 crate：`InksyncCore`（与 main.dart 注入处一致）。
+
+rust_input:
+  - "core/src/api.rs"
+
+rust_output:
+  - "core/src/bridge_generated.rs"
+
+dart_output:
+  - "app/lib/bridge/"
