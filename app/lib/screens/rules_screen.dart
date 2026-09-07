@@ -379,6 +379,7 @@ class _RuleEditorSheetState extends ConsumerState<_RuleEditorSheet> {
             HighlightRule(
               id: DateTime.now().microsecondsSinceEpoch.toRadixString(36),
               name: _name.text.trim(),
+              kind: _kind,
             ))
         .copyWith(
       name: _name.text.trim().isEmpty ? '未命名规则' : _name.text.trim(),
@@ -502,20 +503,20 @@ Future<void> _upsert(WidgetRef ref, HighlightRule rule) async {
         name: row.name,
         kind: row.kind.name,
         pattern: row.pattern,
-        caseSensitive: Value(row.caseSensitive),
+        caseSensitive: row.caseSensitive,
         colorValue: row.colorValue,
         bgColorValue: row.bgColorValue,
-        bgOpacity: Value(row.bgOpacity),
-        bold: Value(row.bold),
-        italic: Value(row.italic),
-        underline: Value(row.underline),
-        priority: Value(row.priority),
-        scopeCsv: Value(row.scope.map((s) => s.name).join(',')),
-        enabled: Value(row.enabled),
-        sortOrder: Value(row.sortOrder),
-        hlc: Value(row.hlc),
-        updatedBy: Value(deviceId),
-        deleted: Value(row.deleted),
+        bgOpacity: row.bgOpacity,
+        bold: row.bold,
+        italic: row.italic,
+        underline: row.underline,
+        priority: row.priority,
+        scopeCsv: row.scope.map((s) => s.name).join(','),
+        enabled: row.enabled,
+        sortOrder: row.sortOrder,
+        hlc: row.hlc,
+        updatedBy: deviceId,
+        deleted: row.deleted,
       ));
 
   await db.into(db.outbox).insert(OutboxCompanion.insert(

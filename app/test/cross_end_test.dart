@@ -156,12 +156,12 @@ void main() {
     for (final db in [a, b]) {
       await db.into(db.books).insert(BooksCompanion.insert(
         id: bookId,
-        sha256: const Value(''),
+        sha256: '',
         format: 'epub',
         title: 'X',
-        subtitle: const Value('原副标题'),
-        addedAt: Value(DateTime.parse(_t)),
-        updatedAt: Value(DateTime.parse(_t)),
+        subtitle: '原副标题',
+        addedAt: DateTime.parse(_t),
+        updatedAt: DateTime.parse(_t),
         hlc: h.encode(),
         updatedBy: 'aaaaaaaa',
       ));
@@ -207,12 +207,12 @@ void main() {
     // —— A 端落地本地行 + 入 outbox（payload 用修复后的规范 schema）——
     await a.into(a.books).insert(BooksCompanion.insert(
       id: bookId,
-      sha256: const Value(''),
+      sha256: '',
       format: 'epub',
       title: '测试书',
-      tagsJson: Value(jsonEncode(['t1', 't2'])),
-      addedAt: Value(DateTime.parse(_t)),
-      updatedAt: Value(DateTime.parse(_t)),
+      tagsJson: jsonEncode(['t1', 't2']),
+      addedAt: DateTime.parse(_t),
+      updatedAt: DateTime.parse(_t),
       hlc: h.encode(),
       updatedBy: 'aaaaaaaa',
     ));
@@ -247,9 +247,9 @@ void main() {
 
     await a.into(a.progresses).insert(ProgressesCompanion.insert(
       bookId: bookId,
-      locatorJson: const Value('{}'),
-      percent: const Value(0.5),
-      updatedAt: Value(DateTime.parse(_t)),
+      locatorJson: '{}',
+      percent: 0.5,
+      updatedAt: DateTime.parse(_t),
       hlc: h.encode(),
       updatedBy: 'aaaaaaaa',
     ));
@@ -272,7 +272,7 @@ void main() {
       pattern: 'foo',
       colorValue: 0xFFFF0000,
       bgColorValue: 0xFFFFFF00,
-      scopeCsv: const Value('comic,novel'),
+      scopeCsv: 'comic,novel',
       hlc: h.encode(),
       updatedBy: 'aaaaaaaa',
     ));
@@ -335,11 +335,11 @@ void main() {
     // 先建好并同步过去
     await a.into(a.books).insert(BooksCompanion.insert(
       id: bookId,
-      sha256: const Value(''),
+      sha256: '',
       format: 'epub',
       title: '待删书',
-      addedAt: Value(DateTime.parse(_t)),
-      updatedAt: Value(DateTime.parse(_t)),
+      addedAt: DateTime.parse(_t),
+      updatedAt: DateTime.parse(_t),
       hlc: h.encode(),
       updatedBy: 'aaaaaaaa',
     ));
@@ -395,8 +395,8 @@ void main() {
     await enqueueRaw(a, 'collection', colId, 'upsert',
         {'id': colId, 'name': '待删分组', 'sortOrder': 0, 'deleted': false, 'hlc': h.encode(), 'updatedBy': 'aaaaaaaa'}, h.encode());
     await a.into(a.books).insert(BooksCompanion.insert(
-      id: bookId, sha256: const Value(''), format: 'epub', title: '在分组里的书',
-      addedAt: Value(DateTime.parse(_t)), updatedAt: Value(DateTime.parse(_t)),
+      id: bookId, sha256: '', format: 'epub', title: '在分组里的书',
+      addedAt: DateTime.parse(_t), updatedAt: DateTime.parse(_t),
       hlc: h.encode(), updatedBy: 'aaaaaaaa'));
     await enqueueRaw(a, 'book', bookId, 'upsert',
         {'id': bookId, 'sha256': '', 'format': 'epub', 'title': '在分组里的书', 'hlc': h.encode(), 'updatedBy': 'aaaaaaaa'}, h.encode());
@@ -438,11 +438,11 @@ void main() {
     for (final db in [a, b]) {
       await db.into(db.books).insert(BooksCompanion.insert(
         id: bookId,
-        sha256: const Value(''),
+        sha256: '',
         format: 'epub',
         title: 'base',
-        addedAt: Value(DateTime.parse(_t)),
-        updatedAt: Value(DateTime.parse(_t)),
+        addedAt: DateTime.parse(_t),
+        updatedAt: DateTime.parse(_t),
         hlc: hBase.encode(),
         updatedBy: '00000000',
       ));
@@ -452,11 +452,11 @@ void main() {
     // A 改成 A版，B 改成 B版（都入 outbox）
     await a.into(a.books).insertOnConflictUpdate(BooksCompanion.insert(
       id: bookId,
-      sha256: const Value(''),
+      sha256: '',
       format: 'epub',
       title: 'A版',
-      addedAt: Value(DateTime.parse(_t)),
-      updatedAt: Value(DateTime.parse(_t)),
+      addedAt: DateTime.parse(_t),
+      updatedAt: DateTime.parse(_t),
       hlc: hA.encode(),
       updatedBy: 'aaaaaaaa',
     ));
@@ -464,11 +464,11 @@ void main() {
         {'id': bookId, 'sha256': '', 'format': 'epub', 'title': 'A版', 'hlc': hA.encode(), 'updatedBy': 'aaaaaaaa'}, hA.encode());
     await b.into(b.books).insertOnConflictUpdate(BooksCompanion.insert(
       id: bookId,
-      sha256: const Value(''),
+      sha256: '',
       format: 'epub',
       title: 'B版',
-      addedAt: Value(DateTime.parse(_t)),
-      updatedAt: Value(DateTime.parse(_t)),
+      addedAt: DateTime.parse(_t),
+      updatedAt: DateTime.parse(_t),
       hlc: hB.encode(),
       updatedBy: 'bbbbbbbb',
     ));

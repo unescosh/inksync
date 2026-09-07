@@ -374,7 +374,7 @@ class WebDavClient {
       out.add(
         DavEntry(
           path: decoded,
-          name: name,
+          name: name ?? '',
           isDir: isDir,
           size: size,
           etag: etag,

@@ -230,7 +230,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   Future<void> setState(String key, String? value) => into(syncStates).insertOnConflictUpdate(
-        SyncStatesCompanion.insert(key: key, value: Value(value)),
+        SyncStatesCompanion.insert(key: key, value: value),
       );
 
   Future<Hlc> get lastAppliedHlc async {
@@ -385,9 +385,9 @@ class AppDatabase extends _$AppDatabase {
         id: m.id,
         bookId: m.bookId,
         collectionId: m.collectionId,
-        removed: const Value(true),
-        hlc: Value(hlc),
-        updatedBy: Value(deviceId),
+        removed: true,
+        hlc: hlc,
+        updatedBy: deviceId,
       ));
       await into(outbox).insert(OutboxCompanion.insert(
         entityType: 'membership',
