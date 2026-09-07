@@ -188,15 +188,7 @@ class SyncEngine {
     // 1. 拉 manifest（带 ETag，未变则 304）
     final cachedEtag = await db.getState(SyncStateKeys.manifestEtag);
     final got = await client.getIfChanged(_manifestPath, cachedEtag);
-    Manifest remote;
-    String? manifestEtag;
-    if (got == null) {
-      remote = Manifest(schema: 1, lastHlc: lastApplied.encode(), files: const []);
-      manifestEtag = cachedEtag;
-    } else {
-      remote = Manifest.parse(utf8.decode(got.bytes));
-      manifestEtag = got.etag;
-    }
+    final manifestEtag = got == null ? cachedEtag : got.etag;
 
     // 2. 列 changes/ → 只下载比 lastApplied 新的批次
     _emit(SyncPhase.pulling, '拉取变更');

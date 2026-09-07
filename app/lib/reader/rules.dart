@@ -1,5 +1,3 @@
-import 'package:flutter/material.dart';
-
 /// 自定义高亮规则引擎。
 ///
 /// 设计取舍：

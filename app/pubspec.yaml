@@ -51,10 +51,3 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  assets:
-    - assets/fonts/
-  fonts:
-    # 内置思源宋体子集，规避 UOS 精简版缺字 / Android ROM 字体不一致
-    - family: SourceHanSerif
-      fonts:
-        - asset: assets/fonts/SourceHanSerifSC-Subset.ttf

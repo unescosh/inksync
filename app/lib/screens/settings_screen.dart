@@ -103,8 +103,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     try {
       await saveWebDavConfig(_buildConfig());
       // 重建引擎 + 配置，使 SyncController 下一次 syncNow 能拿到 client
-      ref.refresh(webdavConfigProvider);
-      ref.refresh(syncEngineProvider);
+      ref.invalidate(webdavConfigProvider);
+      ref.invalidate(syncEngineProvider);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('已保存同步设置')),
