@@ -278,7 +278,8 @@ pub struct SyncReport {
     pub pushed_changes: u32,
     pub uploaded_books: u32,
     pub downloaded_books: u32,
-    /// 封面图片跨端传输计数（与 Dart 引擎 SyncReport 对齐；Rust 同步编排层尚未实装，暂不使用）
+    /// 封面图片跨端传输计数（与 Dart 引擎 SyncReport 对齐；
+    /// 由 `core::sync::transfer::transfer_covers` 在 Rust 原生同步路径下产出）
     pub uploaded_covers: u32,
     pub downloaded_covers: u32,
     pub conflicts: u32,

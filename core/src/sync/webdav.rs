@@ -7,6 +7,7 @@ use url::Url;
 
 use crate::error::{Error, Result};
 use crate::model::WebDavConfig;
+use crate::sync::transfer::DavFs;
 
 /// PROPFIND 请求的默认属性集
 const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -459,4 +460,31 @@ where
         }
     }
     Err(last.unwrap_or_else(|| Error::Other("重试耗尽".into())))
+}
+
+// ─────────────────────── DavFs 接缝（供 sync/transfer 复用） ───────────────────────
+//
+// transfer 模块的编排逻辑通过 `DavFs` trait 与具体 WebDAV 实现解耦；
+// 这里把真实 `WebDavClient` 接进 trait，仅在 `sync` feature 下编译
+// （WebDavClient 本身也只在 sync 下存在）。transfer 模块本体不门控，
+// 故默认 `cargo test` 也能编译并单测编排逻辑。
+
+#[cfg(feature = "sync")]
+impl DavFs for WebDavClient {
+    fn mkcol_all(&self, cfg: &WebDavConfig, path: &str) -> Result<()> {
+        WebDavClient::mkcol_all(self, cfg, path)
+    }
+
+    fn list_names(&self, cfg: &WebDavConfig, dir: &str) -> Result<Vec<String>> {
+        let entries = WebDavClient::list(self, cfg, dir, 1)?;
+        Ok(entries.into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect())
+    }
+
+    fn get_bytes(&self, cfg: &WebDavConfig, path: &str) -> Result<Vec<u8>> {
+        WebDavClient::get_bytes(self, cfg, path)
+    }
+
+    fn put_atomic(&self, cfg: &WebDavConfig, path: &str, body: Vec<u8>) -> Result<()> {
+        WebDavClient::put_atomic(self, cfg, path, body)
+    }
 }
