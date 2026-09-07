@@ -448,7 +448,7 @@ class SyncEngine {
           'op': r.op,
           'hlc': r.hlc,
           'node': deviceId,
-          if (r.op == 'upsert') 'd': jsonDecode(r.payloadJson),
+          if (r.op == 'upsert' || r.op == 'delete') 'd': jsonDecode(r.payloadJson),
         }),
       );
     }
