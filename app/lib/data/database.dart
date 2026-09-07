@@ -155,7 +155,7 @@ class Outbox extends Table {
   DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
 }
 
-/// 键值形态的同步状态：lastAppliedHlc / lastPushedHlc / manifestEtag / deviceId ...
+/// 键值形态的同步状态：lastAppliedHlc / manifestEtag / deviceId ...
 class SyncStates extends Table {
   TextColumn get key => text()();
   TextColumn get value => text().nullable()();
@@ -597,7 +597,6 @@ class BookWithProgress {
 
 class SyncStateKeys {
   static const lastAppliedHlc = 'lastAppliedHlc';
-  static const lastPushedHlc = 'lastPushedHlc';
   static const manifestEtag = 'manifestEtag';
   static const deviceId = 'deviceId';
   static const lastSyncAt = 'lastSyncAt';

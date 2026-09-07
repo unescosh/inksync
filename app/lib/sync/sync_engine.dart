@@ -240,7 +240,6 @@ class SyncEngine {
     final finalEtag = (await client.propfind(_manifestPath, depth: 0)).firstOrNullEtag;
     if (finalEtag != null) await db.setState(SyncStateKeys.manifestEtag, finalEtag);
     await db.setState(SyncStateKeys.lastAppliedHlc, newManifest.lastHlc);
-    await db.setState(SyncStateKeys.lastPushedHlc, newManifest.lastHlc);
     await db.setState(SyncStateKeys.lastSyncAt, DateTime.now().toUtc().toIso8601String());
     report.newLastHlc = Hlc.parse(newManifest.lastHlc);
 
