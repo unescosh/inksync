@@ -707,7 +707,7 @@ CollectionsCompanion _collectionCompanion(Map<String, dynamic> m) => Collections
       id: m['id'] as String,
       name: m['name'] as String? ?? '',
       sortOrder: Value((m['sortOrder'] as num?)?.toInt() ?? 0),
-      colorValue: (m['colorValue'] as num?)?.toInt(),
+      colorValue: Value((m['colorValue'] as num?)?.toInt()),
       emoji: Value(m['emoji'] as String?),
       hlc: m['hlc'] as String? ?? Hlc.zero.encode(),
       updatedBy: m['updatedBy'] as String? ?? '',
