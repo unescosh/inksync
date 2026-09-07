@@ -443,6 +443,6 @@ class WebDavClient {
   }
 }
 
-extension _LastOrNull on List<String> {
+extension _LastOrNull on Iterable<String> {
   String? get lastOrNullSafe => isEmpty ? null : last;
 }

@@ -5,7 +5,6 @@ import 'dart:typed_data';
 /// 真正的实现由 `flutter_rust_bridge` 生成的绑定注入（`CallbackNativeCore`），
 /// 这样本文件不依赖生成产物、永远可编译；
 /// 万一 UOS 是非 x86 架构需要换成 Qt UI，Rust 核心（含解析与同步）可 100% 复用。
-library;
 
 enum BookFormatDart { epub, txt, mobi, azw3, pdf, cbz, cbr, unknown }
 

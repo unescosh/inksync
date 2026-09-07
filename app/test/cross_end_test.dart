@@ -103,7 +103,7 @@ class MockWebDavClient extends WebDavClient {
 
 /// 不碰真实磁盘：测试里的书 sha256 都为空，SyncEngine._transferBlobs 会直接跳过。
 class FakeBlobStore extends BlobStore {
-  const FakeBlobStore();
+  FakeBlobStore();
   @override
   Future<String?> pathFor(String sha256) async => null;
   @override
@@ -115,7 +115,7 @@ SyncEngine makeEngine(AppDatabase db, WebDavClient client, String deviceId) => S
       client: client,
       deviceId: deviceId,
       clock: HlcClock(deviceId),
-      blobs: const FakeBlobStore(),
+      blobs: FakeBlobStore(),
       remoteRoot: 'inksync',
     );
 

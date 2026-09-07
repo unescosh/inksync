@@ -9,14 +9,14 @@ import 'package:sqlite3_flutter_libs/sqlite3_flutter_libs.dart';
 
 import '../core/hlc.dart';
 
-part 'database.g.dart';
-
 // UI 层要用 `Value(...)` 之类的少数 drift 符号，但屏幕代码不能直接
 // `import 'package:drift/drift.dart'` —— drift 的 `Column` / `Table` 会和
 // material 的 `Column` / `Table` 撞名，一用就是 ambiguous import 报错。
 // 所以在这里定向再导出，屏幕只 import 本文件。
 export 'package:drift/drift.dart'
     show Value, OrderingTerm, OrderingMode, Expression, CustomExpression;
+
+part 'database.g.dart';
 
 // ─────────────────────────── 表定义 ───────────────────────────
 //

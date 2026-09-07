@@ -17,7 +17,6 @@ import 'webdav_client.dart';
 ///  · 远端只**追加**文件：`changes/<HLC>-<node>.jsonl`，文件名字典序即时间序；
 ///  · 书籍文件按 sha256 **内容寻址**：同名即同内容，天然幂等、免冲突、可秒传；
 ///  · 唯一需要并发写的 `manifest.json` 用 ETag + If-Match 乐观锁，冲突则重跑。
-library;
 
 enum SyncPhase {
   idle,

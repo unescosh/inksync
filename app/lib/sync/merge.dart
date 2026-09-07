@@ -4,7 +4,6 @@ import '../core/hlc.dart';
 ///
 /// 核心思想：**不同数据用不同策略**。一律 LWW 会造成
 /// "读到一半进度被回退"、"分组里加的书被旧快照抹掉"这类致命体验问题。
-library;
 
 enum MergeWinner { local, remote, merged }
 

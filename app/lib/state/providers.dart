@@ -20,7 +20,6 @@ import '../sync/sync_engine.dart';
 import '../sync/webdav_client.dart';
 
 /// 依赖注入与全局状态。
-library;
 
 // ─────────────────────────── 基础设施 ───────────────────────────
 
