@@ -159,7 +159,7 @@ void main() {
         sha256: '',
         format: 'epub',
         title: 'X',
-        subtitle: '原副标题',
+        subtitle: const Value('原副标题'),
         addedAt: DateTime.parse(_t),
         updatedAt: DateTime.parse(_t),
         hlc: h.encode(),

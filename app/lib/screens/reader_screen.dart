@@ -240,7 +240,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
           locatorJson: payload['locatorJson'] as String,
           percent: percent,
           charOffset: charOffset,
-          anchorBefore: anchorBefore,
+          anchorBefore: Value(anchorBefore),
           forced: false,
           hlc: hlc.encode(),
           updatedBy: deviceId,

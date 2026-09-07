@@ -230,7 +230,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   Future<void> setState(String key, String? value) => into(syncStates).insertOnConflictUpdate(
-        SyncStatesCompanion.insert(key: key, value: value),
+        SyncStatesCompanion.insert(key: key, value: Value(value)),
       );
 
   Future<Hlc> get lastAppliedHlc async {
