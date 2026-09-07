@@ -593,7 +593,7 @@ class SyncEngine {
           report.errors.add('《${b.title}》校验失败，已丢弃');
           continue;
         }
-        final tmp = File(p.join((await getTemporaryDirectory()).path, b.sha256));
+        final tmp = File(p.join(Directory.systemTemp.path, b.sha256));
         await tmp.writeAsBytes(bytes, flush: true);
         final dest = await blobs.importFile(tmp.path, b.sha256);
         await tmp.delete();
@@ -652,8 +652,7 @@ class SyncEngine {
           continue;
         }
         final ext = _coverExtForBytes(bytes);
-        final tmpDir = await getTemporaryDirectory();
-        final tmp = File(p.join(tmpDir.path, hash));
+        final tmp = File(p.join(Directory.systemTemp.path, hash));
         await tmp.writeAsBytes(bytes, flush: true);
         final dest = await covers.importFile(tmp.path, hash, ext);
         await tmp.delete();
