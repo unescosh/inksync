@@ -34,17 +34,25 @@ class SyncReport {
   int pushedChanges = 0;
   int uploadedBooks = 0;
   int downloadedBooks = 0;
+  int uploadedCovers = 0;
+  int downloadedCovers = 0;
   int conflicts = 0;
   final List<String> errors = [];
   Hlc? newLastHlc;
 
   bool get ok => errors.isEmpty;
   bool get isEmpty =>
-      pulledChanges == 0 && pushedChanges == 0 && uploadedBooks == 0 && downloadedBooks == 0;
+      pulledChanges == 0 &&
+      pushedChanges == 0 &&
+      uploadedBooks == 0 &&
+      downloadedBooks == 0 &&
+      uploadedCovers == 0 &&
+      downloadedCovers == 0;
 
   @override
   String toString() => '拉取 $pulledChanges / 推送 $pushedChanges / '
-      '上传 $uploadedBooks / 下载 $downloadedBooks / 冲突 $conflicts';
+      '上传书 $uploadedBooks / 下载书 $downloadedBooks / '
+      '上传封面 $uploadedCovers / 下载封面 $downloadedCovers / 冲突 $conflicts';
 }
 
 typedef SyncProgress = void Function(SyncPhase phase, String detail, double? fraction);
@@ -76,6 +84,57 @@ class DefaultBlobStore implements BlobStore {
     final dir = Directory(p.join((await _dir).path, sha256.substring(0, 2)));
     if (!await dir.exists()) await dir.create(recursive: true);
     final dest = p.join(dir.path, sha256);
+    final tmp = '$dest.tmp-${_rng.nextInt(1 << 30)}';
+    await File(sourcePath).copy(tmp);
+    await File(tmp).rename(dest);
+    return dest;
+  }
+}
+
+/// 封面仓库：封面图片按 coverHash(sha256) 内容寻址，
+/// 存于 <cacheDir>/covers/<hash>.<ext>（扩展名由图片魔数决定）。
+///
+/// 与 BlobStore 完全镜像：同名即同内容，天然幂等、免冲突、可秒传。
+/// 封面字节**不进 SQLite**（漫画封面几 MB，塞进库会让每次 watch 查询变慢），
+/// 只把 coverHash 进库，文件本身随书跨端传。
+abstract class CoverStore {
+  /// 返回本地封面文件的绝对路径（带正确扩展名）；不存在返回 null。
+  Future<String?> pathFor(String coverHash);
+
+  /// 把 sourcePath 复制为 <cacheDir>/covers/<hash>.<ext>，返回最终路径。
+  Future<String> importFile(String sourcePath, String coverHash, String ext);
+}
+
+class DefaultCoverStore implements CoverStore {
+  DefaultCoverStore([this.cacheDir]);
+
+  /// 不传则默认 <AppDocuments>/cache；桌面/测试可显式注入目录。
+  final String? cacheDir;
+
+  final math.Random _rng = math.Random.secure();
+
+  Future<Directory> get _dir async {
+    final base = cacheDir ?? p.join((await getApplicationDocumentsDirectory()).path, 'cache');
+    final d = Directory(p.join(base, 'covers'));
+    if (!await d.exists()) await d.create(recursive: true);
+    return d;
+  }
+
+  @override
+  Future<String?> pathFor(String coverHash) async {
+    if (coverHash.isEmpty) return null;
+    final dir = await _dir;
+    for (final ext in const ['.jpg', '.png', '.webp', '.gif']) {
+      final f = File(p.join(dir.path, '$coverHash$ext'));
+      if (await f.exists()) return f.path;
+    }
+    return null;
+  }
+
+  @override
+  Future<String> importFile(String sourcePath, String coverHash, String ext) async {
+    final dir = await _dir;
+    final dest = p.join(dir.path, '$coverHash$ext');
     final tmp = '$dest.tmp-${_rng.nextInt(1 << 30)}';
     await File(sourcePath).copy(tmp);
     await File(tmp).rename(dest);
@@ -132,6 +191,7 @@ class SyncEngine {
     required this.deviceId,
     required this.clock,
     required this.blobs,
+    required this.covers,
     this.remoteRoot = 'inksync',
     this.onProgress,
   });
@@ -141,6 +201,7 @@ class SyncEngine {
   final String deviceId;
   final HlcClock clock;
   final BlobStore blobs;
+  final CoverStore covers;
   final String remoteRoot;
   final SyncProgress? onProgress;
 
@@ -149,8 +210,10 @@ class SyncEngine {
   String get _changesPath => '$remoteRoot/changes';
   String get _manifestPath => '$remoteRoot/manifest.json';
   String get _blobsPath => '$remoteRoot/blobs';
+  String get _coversPath => '$remoteRoot/covers';
 
   String blobRemotePath(String sha) => '$_blobsPath/${sha.substring(0, 2)}/$sha';
+  String coverRemotePath(String hash) => '$_coversPath/${hash.substring(0, 2)}/$hash';
 
   void _emit(SyncPhase phase, String detail, [double? f]) => onProgress?.call(phase, detail, f);
 
@@ -182,6 +245,7 @@ class SyncEngine {
     await client.mkcolAll('$remoteRoot/');
     await client.mkcolAll('$_changesPath/');
     await client.mkcolAll('$_blobsPath/');
+    await client.mkcolAll('$_coversPath/');
 
     final lastApplied = await db.lastAppliedHlc;
 
@@ -228,6 +292,10 @@ class SyncEngine {
     // 5. 传输书籍文件（内容寻址，已存在即秒传跳过）
     _emit(SyncPhase.transferring, '同步书籍文件');
     await _transferBlobs(report);
+
+    // 5b. 传输封面图片（内容寻址，缺则补传/补下，落盘后回填 coverPath）
+    _emit(SyncPhase.transferring, '同步封面图片');
+    await _transferCovers(report);
 
     // 6. 写 manifest（乐观锁）
     _emit(SyncPhase.finalizing, '写入 manifest');
@@ -541,6 +609,84 @@ class SyncEngine {
   Future<bool> _remoteHasBlob(String sha) async {
     final entries = await client.propfind('$_blobsPath/${sha.substring(0, 2)}/', depth: 1);
     return entries.any((e) => e.name == sha);
+  }
+
+  // ─────────────────────────── 封面图片传输 ───────────────────────────
+  //
+  // 封面与书籍完全镜像：按 coverHash 内容寻址，远端 covers/<hash[:2]>/<hash>，
+  // 本地 <cacheDir>/covers/<hash>.<ext>。元数据（coverHash）已在 book payload 里
+  // 同步，这里只负责把字节本身跨端传过去，并回填本地 coverPath。
+
+  Future<void> _transferCovers(SyncReport report) async {
+    final books = await (db.select(db.books)).get();
+    for (final b in books) {
+      if ((b.coverHash ?? '').isEmpty) continue;
+      final remotePath = coverRemotePath(b.coverHash);
+
+      // 上传：本地有封面、远端没有 → 传（内容寻址，同名即同内容，天然幂等）
+      final localPath = b.coverPath ?? await covers.pathFor(b.coverHash);
+      if (localPath != null && await File(localPath).exists()) {
+        if (!await _remoteHasCover(b.coverHash)) {
+          try {
+            final bytes = await File(localPath).readAsBytes();
+            await client.putAtomic(remotePath, bytes, onProgress: (sent, total) {
+              _emit(SyncPhase.transferring, '上传《${b.title}》封面',
+                  total == 0 ? null : sent / total);
+            });
+            report.uploadedCovers++;
+          } catch (e) {
+            report.errors.add('上传《${b.title}》封面失败: $e');
+          }
+        }
+        continue;
+      }
+
+      // 下载：本地没封面、远端有 → 下（并校验 coverHash）
+      try {
+        if (!await _remoteHasCover(b.coverHash)) continue;
+        final bytes = await client.getBytes(remotePath);
+        final actual = _sha256OfBytes(bytes);
+        if (actual != b.coverHash) {
+          report.errors.add('《${b.title}》封面校验失败，已丢弃');
+          continue;
+        }
+        final ext = _coverExtForBytes(bytes);
+        final tmpDir = await getTemporaryDirectory();
+        final tmp = File(p.join(tmpDir.path, b.coverHash));
+        await tmp.writeAsBytes(bytes, flush: true);
+        final dest = await covers.importFile(tmp.path, b.coverHash, ext);
+        await tmp.delete();
+        // 回填本地封面路径，书架才能正常显示
+        await (db.update(db.books)..where((t) => t.id.equals(b.id)))
+            .write(BooksCompanion(coverPath: Value(dest)));
+        report.downloadedCovers++;
+      } catch (e) {
+        report.errors.add('下载《${b.title}》封面失败: $e');
+      }
+    }
+  }
+
+  Future<bool> _remoteHasCover(String hash) async {
+    final entries = await client.propfind('$_coversPath/${hash.substring(0, 2)}/', depth: 1);
+    return entries.any((e) => e.name == hash);
+  }
+
+  /// 从图片二进制魔数推断扩展名（与 providers.dart::_coverExt 覆盖的格式对齐）。
+  /// 远端封面不带扩展名，B 端落地时按此决定文件名后缀，保证 UI 能按 coverPath 找到它。
+  String _coverExtForBytes(List<int> b) {
+    if (b.length >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return '.jpg';
+    if (b.length >= 8 &&
+        b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47 &&
+        b[4] == 0x0D && b[5] == 0x0A && b[6] == 0x1A && b[7] == 0x0A) {
+      return '.png';
+    }
+    if (b.length >= 6 && b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x47) return '.gif';
+    if (b.length >= 12 &&
+        b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46 &&
+        b[8] == 0x57 && b[9] == 0x45 && b[10] == 0x42 && b[11] == 0x50) {
+      return '.webp';
+    }
+    return '.jpg';
   }
 
   /// 书籍文件按 sha256 内容寻址。下载后必须校验，不符则丢弃重下。

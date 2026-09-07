@@ -71,6 +71,8 @@ final webdavClientProvider = FutureProvider<WebDavClient?>((ref) async {
 
 final blobStoreProvider = Provider<BlobStore>((ref) => DefaultBlobStore());
 
+final coverStoreProvider = Provider<CoverStore>((ref) => DefaultCoverStore());
+
 final syncEngineProvider = FutureProvider<SyncEngine?>((ref) async {
   final client = await ref.watch(webdavClientProvider.future);
   if (client == null) return null;
@@ -83,6 +85,7 @@ final syncEngineProvider = FutureProvider<SyncEngine?>((ref) async {
     deviceId: deviceId,
     clock: clock,
     blobs: ref.watch(blobStoreProvider),
+    covers: ref.watch(coverStoreProvider),
     onProgress: (phase, detail, f) => ref.read(syncProgressProvider.notifier).state =
         SyncProgressState(phase, detail, f),
   );

@@ -7,10 +7,14 @@
 // 跑法：app 目录下 `flutter test`（CI 已配，且已装 sqlite3 原生库）。
 
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart' show sha256;
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 
 import 'package:inksync/core/hlc.dart';
 import 'package:inksync/data/database.dart';
@@ -109,12 +113,34 @@ class FakeBlobStore extends BlobStore {
   Future<String> importFile(String sourcePath, String sha256) async => sourcePath;
 }
 
-SyncEngine makeEngine(AppDatabase db, WebDavClient client, String deviceId) => SyncEngine(
+/// 封面仓库的内存版：把文件拷到临时目录并记账 hash→路径，便于断言"封面已落地"。
+class FakeCoverStore extends CoverStore {
+  FakeCoverStore([String? dir])
+      : _dir = dir ?? Directory.systemTemp.createTempSync('cov-fake-').path;
+  final String _dir;
+  final Map<String, String> files = {}; // coverHash → 本地路径
+
+  @override
+  Future<String?> pathFor(String coverHash) async => files[coverHash];
+
+  @override
+  Future<String> importFile(String sourcePath, String coverHash, String ext) async {
+    final dest = p.join(_dir, '$coverHash$ext');
+    await File(sourcePath).copy(dest);
+    files[coverHash] = dest;
+    return dest;
+  }
+}
+
+SyncEngine makeEngine(AppDatabase db, WebDavClient client, String deviceId,
+        [BlobStore? blobs, CoverStore? covers]) =>
+    SyncEngine(
       db: db,
       client: client,
       deviceId: deviceId,
       clock: HlcClock(deviceId),
-      blobs: FakeBlobStore(),
+      blobs: blobs ?? FakeBlobStore(),
+      covers: covers ?? FakeCoverStore(),
       remoteRoot: 'inksync',
     );
 
@@ -485,6 +511,79 @@ void main() {
     expect(repA1.conflicts + repB.conflicts + repA2.conflicts, greaterThan(0), reason: '应记录冲突');
     final log = await (a.select(a.conflictLog)).get();
     expect(log, isNotEmpty, reason: '冲突应留痕到 conflictLog');
+
+    await a.close();
+    await b.close();
+  });
+
+  test('封面图片随书跨端传输（内容寻址 + sha256 校验 + 回填 coverPath）', () async {
+    // 复现封面同步缺口：A 有封面文件、B 只有 coverHash（元数据已同步，字节未传），
+    // 验证一次同步后 B 能下载到封面、sha256 与 A 一致，且 book.coverPath 被回填。
+    final a = AppDatabase.forTesting(NativeDatabase.memory());
+    final b = AppDatabase.forTesting(NativeDatabase.memory());
+    final client = MockWebDavClient();
+
+    // 造一张封面（JPEG 头，让格式探测返回 .jpg）
+    final coverBytes = Uint8List.fromList([
+      0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46,
+      ...List.generate(200, (i) => i & 0xFF),
+    ]);
+    final coverHash = sha256.convert(coverBytes).toString();
+
+    final aCoverDir = await Directory.systemTemp.createTemp('cov-a-');
+    final aCoverFile = File(p.join(aCoverDir.path, '$coverHash.jpg'));
+    await aCoverFile.writeAsBytes(coverBytes, flush: true);
+    final aStore = FakeCoverStore(aCoverDir.path)..files[coverHash] = aCoverFile.path;
+    final bStore = FakeCoverStore(); // B 端初始无封面
+
+    const bookId = 'book-cover';
+    final h = Hlc(wallMs: 1000, counter: 0, node: 'aaaaaaaa');
+    await a.into(a.books).insert(BooksCompanion.insert(
+      id: bookId,
+      sha256: '',
+      format: 'epub',
+      title: '有封面的书',
+      coverHash: Value(coverHash),
+      coverSource: const Value(0),
+      addedAt: DateTime.parse(_t),
+      updatedAt: DateTime.parse(_t),
+      hlc: h.encode(),
+      updatedBy: 'aaaaaaaa',
+    ));
+    await enqueueRaw(a, 'book', bookId, 'upsert', {
+      'id': bookId,
+      'sha256': '',
+      'format': 'epub',
+      'title': '有封面的书',
+      'coverHash': coverHash, // 元数据（含 coverHash）随 book payload 同步
+      'hlc': h.encode(),
+      'updatedBy': 'aaaaaaaa',
+    }, h.encode());
+
+    // A 推（上传封面）→ B 拉（下载封面）
+    final repA = await makeEngine(a, client, 'aaaaaaaa', FakeBlobStore(), aStore).sync();
+    expect(repA.ok, isTrue, reason: 'A 端同步不应失败: ${repA.errors}');
+    expect(repA.uploadedCovers, 1, reason: 'A 应上传 1 张封面');
+
+    final repB = await makeEngine(b, client, 'bbbbbbbb', FakeBlobStore(), bStore).sync();
+    expect(repB.ok, isTrue, reason: 'B 端同步不应失败: ${repB.errors}');
+    expect(repB.downloadedCovers, 1, reason: 'B 应下载 1 张封面');
+
+    // B 端：封面路径被回填，且仓库里能按 hash 取到
+    final bBook = await (b.select(b.books)..where((t) => t.id.equals(bookId))).getSingle();
+    expect(bBook.coverPath, isNotNull, reason: 'B 端 coverPath 应被回填');
+    expect(bStore.files[coverHash], isNotNull, reason: 'B 端封面仓库应含该 hash');
+
+    // 校验：B 落地封面的字节与 A 原图一致（sha256 一致）
+    final landed = await File(bBook.coverPath!).readAsBytes();
+    expect(sha256.convert(landed).toString(), coverHash,
+        reason: 'B 端封面 sha256 应与原图一致');
+
+    // 重复同步应幂等：远端已有封面，不再重复上传/下载
+    final repA2 = await makeEngine(a, client, 'aaaaaaaa', FakeBlobStore(), aStore).sync();
+    final repB2 = await makeEngine(b, client, 'bbbbbbbb', FakeBlobStore(), bStore).sync();
+    expect(repA2.uploadedCovers, 0, reason: '幂等：A 不应重复上传');
+    expect(repB2.downloadedCovers, 0, reason: '幂等：B 不应重复下载');
 
     await a.close();
     await b.close();
