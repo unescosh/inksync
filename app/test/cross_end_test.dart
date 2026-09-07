@@ -7,7 +7,6 @@
 // 跑法：app 目录下 `flutter test`（CI 已配，且已装 sqlite3 原生库）。
 
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';

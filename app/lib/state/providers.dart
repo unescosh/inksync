@@ -6,7 +6,6 @@ import 'dart:math' as math;
 // drift 的 Value / *Companion / OrderingTerm 在本文件直接使用。
 // 这里不会和 material 的 Table/Column 撞名 —— 本文件不 import material。
 import 'package:crypto/crypto.dart' show sha256;
-import 'package:drift/drift.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path/path.dart' as p;
