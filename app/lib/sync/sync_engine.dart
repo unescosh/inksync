@@ -620,13 +620,14 @@ class SyncEngine {
   Future<void> _transferCovers(SyncReport report) async {
     final books = await (db.select(db.books)).get();
     for (final b in books) {
-      if ((b.coverHash ?? '').isEmpty) continue;
-      final remotePath = coverRemotePath(b.coverHash);
+      final hash = b.coverHash;
+      if (hash == null || hash.isEmpty) continue;
+      final remotePath = coverRemotePath(hash);
 
       // 上传：本地有封面、远端没有 → 传（内容寻址，同名即同内容，天然幂等）
-      final localPath = b.coverPath ?? await covers.pathFor(b.coverHash);
+      final localPath = b.coverPath ?? await covers.pathFor(hash);
       if (localPath != null && await File(localPath).exists()) {
-        if (!await _remoteHasCover(b.coverHash)) {
+        if (!await _remoteHasCover(hash)) {
           try {
             final bytes = await File(localPath).readAsBytes();
             await client.putAtomic(remotePath, bytes, onProgress: (sent, total) {
@@ -643,18 +644,18 @@ class SyncEngine {
 
       // 下载：本地没封面、远端有 → 下（并校验 coverHash）
       try {
-        if (!await _remoteHasCover(b.coverHash)) continue;
+        if (!await _remoteHasCover(hash)) continue;
         final bytes = await client.getBytes(remotePath);
         final actual = _sha256OfBytes(bytes);
-        if (actual != b.coverHash) {
+        if (actual != hash) {
           report.errors.add('《${b.title}》封面校验失败，已丢弃');
           continue;
         }
         final ext = _coverExtForBytes(bytes);
         final tmpDir = await getTemporaryDirectory();
-        final tmp = File(p.join(tmpDir.path, b.coverHash));
+        final tmp = File(p.join(tmpDir.path, hash));
         await tmp.writeAsBytes(bytes, flush: true);
-        final dest = await covers.importFile(tmp.path, b.coverHash, ext);
+        final dest = await covers.importFile(tmp.path, hash, ext);
         await tmp.delete();
         // 回填本地封面路径，书架才能正常显示
         await (db.update(db.books)..where((t) => t.id.equals(b.id)))

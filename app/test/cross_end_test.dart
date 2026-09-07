@@ -8,7 +8,6 @@
 
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' show sha256;
 import 'package:drift/drift.dart';
@@ -571,8 +570,9 @@ void main() {
 
     // B 端：封面路径被回填，且仓库里能按 hash 取到
     final bBook = await (b.select(b.books)..where((t) => t.id.equals(bookId))).getSingle();
-    expect(bBook.coverPath, isNotNull, reason: 'B 端 coverPath 应被回填');
-    expect(bStore.files[coverHash], isNotNull, reason: 'B 端封面仓库应含该 hash');
+    expect(bBook.coverPath, isNotEmpty, reason: 'B 端 coverPath 应被回填');
+    expect(bStore.files.containsKey(coverHash), isTrue,
+        reason: 'B 端封面仓库应含该 hash');
 
     // 校验：B 落地封面的字节与 A 原图一致（sha256 一致）
     final landed = await File(bBook.coverPath!).readAsBytes();
