@@ -516,6 +516,10 @@ void main() {
   });
 
   test('封面图片随书跨端传输（内容寻址 + sha256 校验 + 回填 coverPath）', () async {
+    // 下载分支会调用 path_provider 的 getTemporaryDirectory()，需要先初始化 Flutter 绑定
+    // （其它用例的书 sha256 为空、在触达 getTemporaryDirectory 前就跳过了传输，故无需绑定）。
+    TestWidgetsFlutterBinding.ensureInitialized();
+
     // 复现封面同步缺口：A 有封面文件、B 只有 coverHash（元数据已同步，字节未传），
     // 验证一次同步后 B 能下载到封面、sha256 与 A 一致，且 book.coverPath 被回填。
     final a = AppDatabase.forTesting(NativeDatabase.memory());
