@@ -385,7 +385,7 @@ class AppDatabase extends _$AppDatabase {
         id: m.id,
         bookId: m.bookId,
         collectionId: m.collectionId,
-        removed: true,
+        removed: const Value(true),
         hlc: hlc,
         updatedBy: deviceId,
       ));

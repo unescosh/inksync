@@ -608,20 +608,20 @@ BooksCompanion _bookCompanion(Map<String, dynamic> m) => BooksCompanion.insert(
       series: Value(m['series'] as String?),
       seriesIndex: Value((m['seriesIndex'] as num?)?.toDouble()),
       description: Value(m['description'] as String?),
-      tagsJson: m['tagsJson'] as String? ?? '[]',
+      tagsJson: Value(m['tagsJson'] as String? ?? '[]'),
       localPath: Value(m['localPath'] as String?),
       coverPath: Value(m['coverPath'] as String?),
       coverHash: Value(m['coverHash'] as String?),
-      coverSource: (m['coverSource'] as num?)?.toInt() ?? 0,
-      fileSize: (m['fileSize'] as num?)?.toInt() ?? 0,
-      totalChars: (m['totalChars'] as num?)?.toInt() ?? 0,
+      coverSource: Value((m['coverSource'] as num?)?.toInt() ?? 0),
+      fileSize: Value((m['fileSize'] as num?)?.toInt() ?? 0),
+      totalChars: Value((m['totalChars'] as num?)?.toInt() ?? 0),
       addedAt: m['addedAt'] == null
           ? DateTime.now()
           : DateTime.tryParse(m['addedAt'] as String) ?? DateTime.now(),
       updatedAt: DateTime.tryParse(m['updatedAt'] as String? ?? '') ?? DateTime.now(),
       hlc: m['hlc'] as String? ?? Hlc.zero.encode(),
       updatedBy: m['updatedBy'] as String? ?? '',
-      deleted: m['deleted'] == true,
+      deleted: Value(m['deleted'] == true),
     );
 
 Map<String, dynamic> _progressToMap(ProgressRow r) => {
@@ -640,11 +640,11 @@ Map<String, dynamic> _progressToMap(ProgressRow r) => {
 ProgressesCompanion _progressCompanion(Map<String, dynamic> m) => ProgressesCompanion.insert(
       bookId: m['bookId'] as String,
       locatorJson: m['locatorJson'] as String? ?? '{}',
-      percent: (m['percent'] as num?)?.toDouble() ?? 0,
-      charOffset: (m['charOffset'] as num?)?.toInt() ?? 0,
+      percent: Value((m['percent'] as num?)?.toDouble() ?? 0),
+      charOffset: Value((m['charOffset'] as num?)?.toInt() ?? 0),
       anchorBefore: Value(m['anchorBefore'] as String?),
       anchorAfter: Value(m['anchorAfter'] as String?),
-      forced: m['forced'] == true,
+      forced: Value(m['forced'] == true),
       updatedAt: DateTime.tryParse(m['updatedAt'] as String? ?? '') ?? DateTime.now(),
       hlc: m['hlc'] as String? ?? Hlc.zero.encode(),
       updatedBy: m['updatedBy'] as String? ?? '',
@@ -676,20 +676,20 @@ RulesCompanion _ruleCompanion(Map<String, dynamic> m) => RulesCompanion.insert(
       name: m['name'] as String? ?? '',
       kind: m['kind'] as String? ?? 'regex',
       pattern: m['pattern'] as String? ?? '',
-      caseSensitive: m['caseSensitive'] == true,
+      caseSensitive: Value(m['caseSensitive'] == true),
       colorValue: (m['colorValue'] as num?)?.toInt() ?? 0xFFD32F2F,
       bgColorValue: (m['bgColorValue'] as num?)?.toInt() ?? 0xFFFFF176,
-      bgOpacity: (m['bgOpacity'] as num?)?.toDouble() ?? 0.35,
-      bold: m['bold'] == true,
-      italic: m['italic'] == true,
-      underline: m['underline'] == true,
-      priority: (m['priority'] as num?)?.toInt() ?? 0,
-      scopeCsv: m['scopeCsv'] as String? ?? 'novel',
-      enabled: m['enabled'] != false,
-      sortOrder: (m['sortOrder'] as num?)?.toInt() ?? 0,
+      bgOpacity: Value((m['bgOpacity'] as num?)?.toDouble() ?? 0.35),
+      bold: Value(m['bold'] == true),
+      italic: Value(m['italic'] == true),
+      underline: Value(m['underline'] == true),
+      priority: Value((m['priority'] as num?)?.toInt() ?? 0),
+      scopeCsv: Value(m['scopeCsv'] as String? ?? 'novel'),
+      enabled: Value(m['enabled'] != false),
+      sortOrder: Value((m['sortOrder'] as num?)?.toInt() ?? 0),
       hlc: m['hlc'] as String? ?? Hlc.zero.encode(),
       updatedBy: m['updatedBy'] as String? ?? '',
-      deleted: m['deleted'] == true,
+      deleted: Value(m['deleted'] == true),
     );
 
 Map<String, dynamic> _collectionToMap(CollectionRow r) => {
@@ -706,12 +706,12 @@ Map<String, dynamic> _collectionToMap(CollectionRow r) => {
 CollectionsCompanion _collectionCompanion(Map<String, dynamic> m) => CollectionsCompanion.insert(
       id: m['id'] as String,
       name: m['name'] as String? ?? '',
-      sortOrder: (m['sortOrder'] as num?)?.toInt() ?? 0,
+      sortOrder: Value((m['sortOrder'] as num?)?.toInt() ?? 0),
       colorValue: (m['colorValue'] as num?)?.toInt(),
       emoji: Value(m['emoji'] as String?),
       hlc: m['hlc'] as String? ?? Hlc.zero.encode(),
       updatedBy: m['updatedBy'] as String? ?? '',
-      deleted: m['deleted'] == true,
+      deleted: Value(m['deleted'] == true),
     );
 
 Map<String, dynamic> _membershipToMap(MembershipRow r) => {
@@ -728,8 +728,8 @@ MembershipsCompanion _membershipCompanion(Map<String, dynamic> m) => Memberships
       id: m['id'] as String,
       bookId: m['bookId'] as String,
       collectionId: m['collectionId'] as String,
-      sortOrder: (m['sortOrder'] as num?)?.toInt() ?? 0,
-      removed: m['removed'] == true,
+      sortOrder: Value((m['sortOrder'] as num?)?.toInt() ?? 0),
+      removed: Value(m['removed'] == true),
       hlc: m['hlc'] as String? ?? Hlc.zero.encode(),
       updatedBy: m['updatedBy'] as String? ?? '',
     );

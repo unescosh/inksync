@@ -210,7 +210,7 @@ void main() {
       sha256: '',
       format: 'epub',
       title: '测试书',
-      tagsJson: jsonEncode(['t1', 't2']),
+      tagsJson: Value(jsonEncode(['t1', 't2'])),
       addedAt: DateTime.parse(_t),
       updatedAt: DateTime.parse(_t),
       hlc: h.encode(),
@@ -248,7 +248,7 @@ void main() {
     await a.into(a.progresses).insert(ProgressesCompanion.insert(
       bookId: bookId,
       locatorJson: '{}',
-      percent: 0.5,
+      percent: const Value(0.5),
       updatedAt: DateTime.parse(_t),
       hlc: h.encode(),
       updatedBy: 'aaaaaaaa',
@@ -272,7 +272,7 @@ void main() {
       pattern: 'foo',
       colorValue: 0xFFFF0000,
       bgColorValue: 0xFFFFFF00,
-      scopeCsv: 'comic,novel',
+      scopeCsv: const Value('comic,novel'),
       hlc: h.encode(),
       updatedBy: 'aaaaaaaa',
     ));

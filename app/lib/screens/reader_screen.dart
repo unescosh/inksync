@@ -238,10 +238,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         .insertOnConflictUpdate(ProgressesCompanion.insert(
           bookId: widget.bookId,
           locatorJson: payload['locatorJson'] as String,
-          percent: percent,
-          charOffset: charOffset,
+          percent: Value(percent),
+          charOffset: Value(charOffset),
           anchorBefore: Value(anchorBefore),
-          forced: false,
+          forced: const Value(false),
           hlc: hlc.encode(),
           updatedBy: deviceId,
           updatedAt: DateTime.now().toUtc(),
