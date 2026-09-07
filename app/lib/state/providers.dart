@@ -162,9 +162,7 @@ class SyncController extends Notifier<AsyncValue<SyncReport?>> {
       if (report.pushedChanges == 0 && report.pulledChanges > 0) {
         // 远端拉到了新东西，无需再推
       } else {
-        final pending = await ref.read(databaseProvider).pendingOutbox(
-              await ref.read(databaseProvider).lastAppliedHlc,
-            );
+        final pending = await ref.read(databaseProvider).pendingOutbox();
         if (pending.isNotEmpty) markDirty();
       }
     } catch (e, st) {

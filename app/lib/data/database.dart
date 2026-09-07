@@ -440,10 +440,18 @@ class AppDatabase extends _$AppDatabase {
             ..orderBy([(t) => OrderingTerm.asc(t.sortOrder)]))
           .watch();
 
-  Future<List<OutboxRow>> pendingOutbox(Hlc since) async {
-    final rows = await (select(outbox)..orderBy([(t) => OrderingTerm.asc(t.seq)])).get();
-    return rows.where((r) => Hlc.parse(r.hlc).compareTo(since) > 0).toList();
-  }
+  /// 待推送队列的**全部**记录（按 seq 升序）。
+  ///
+  /// outbox 是本地变更的"唯一事实来源"：每次成功推送后由 [clearOutboxUpTo]
+  /// 按 seq 整体清空，因此这里**绝不**再按 HLC 二次过滤。
+  ///
+  /// 旧实现用 `hlc > lastAppliedHlc` 过滤，但 `lastAppliedHlc` 会被拉取远端批次
+  /// 推进到很大的实时 HLC（批次文件名 = 本端 `clock.tick()` 的实时戳）。一旦它超过
+  /// 本端后产生的本地变更 HLC（例如固定测试 HLC、或本端时钟回拨场景），这些变更
+  /// 就会被误判为"已同步"而永久丢弃——典型受害者就是墓碑删除，导致书籍/分组/
+  /// 规则删除永远推不出去、跨端不同步。
+  Future<List<OutboxRow>> pendingOutbox() async =>
+      (select(outbox)..orderBy([(t) => OrderingTerm.asc(t.seq)])).get();
 
   Future<void> clearOutboxUpTo(int seq) =>
       (delete(outbox)..where((t) => t.seq.isSmallerOrEqualValue(seq))).go();

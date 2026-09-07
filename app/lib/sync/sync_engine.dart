@@ -222,7 +222,7 @@ class SyncEngine {
 
     // 4. 推送本地变更（一个批次一个文件，文件名 = 当前 HLC）
     _emit(SyncPhase.pushing, '推送本地变更');
-    final pushed = await _pushChanges(lastApplied);
+    final pushed = await _pushChanges();
     report.pushedChanges = pushed;
 
     // 5. 传输书籍文件（内容寻址，已存在即秒传跳过）
@@ -434,8 +434,8 @@ class SyncEngine {
 
   // ══════════════════════ 推送本地变更 ══════════════════════
 
-  Future<int> _pushChanges(Hlc since) async {
-    final rows = await db.pendingOutbox(since);
+  Future<int> _pushChanges() async {
+    final rows = await db.pendingOutbox();
     if (rows.isEmpty) return 0;
 
     final hlc = clock.tick();
