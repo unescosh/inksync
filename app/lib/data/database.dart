@@ -529,6 +529,24 @@ class AppDatabase extends _$AppDatabase {
             ..orderBy([(t) => OrderingTerm.asc(t.charOffset)]))
           .watch();
 
+  /// 未处理的冲突列表（按时间倒序），同步中心展示用。「绝不静默覆盖」。
+  Stream<List<ConflictRow>> watchConflicts() =>
+      (select(conflictLog)
+            ..where((t) => t.dismissed.equals(false))
+            ..orderBy([(t) => OrderingTerm.desc(t.createdAt)]))
+          .watch();
+
+  /// 标记某条冲突为已处理（用户已查看/忽略），不再出现在同步中心。
+  Future<void> dismissConflict(int id) =>
+      (update(conflictLog)..where((t) => t.id.equals(id)))
+          .write(const ConflictLogCompanion(dismissed: Value(true)));
+
+  /// 待推送的本地变更数（outbox 行数），同步中心显示「还有 N 条待同步」。
+  Stream<int> watchPendingOutboxCount() =>
+      (select(outbox)..orderBy([(t) => OrderingTerm.asc(t.seq)]))
+          .watch()
+          .map((rows) => rows.length);
+
   /// 删除批注：墓碑软删（与书籍一致，离线端同步后也删），并写 outbox。
   Future<void> tombstoneAnnotation({
     required String id,

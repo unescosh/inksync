@@ -318,6 +318,24 @@ final bookAnnotationsProvider =
   return ref.watch(databaseProvider).watchAnnotations(bookId);
 });
 
+// ─────────────────────────── 同步中心 ───────────────────────────
+
+/// 未处理的冲突列表（同步中心展示）。每条含实体/字段/本地值/远端值/胜方。
+final conflictsProvider =
+    StreamProvider<List<ConflictRow>>((ref) {
+  return ref.watch(databaseProvider).watchConflicts();
+});
+
+/// 待推送的本地变更数（outbox 行数），「还有 N 条待同步」。
+final pendingOutboxCountProvider = StreamProvider<int>((ref) {
+  return ref.watch(databaseProvider).watchPendingOutboxCount();
+});
+
+/// 上次成功同步的时间（ISO8601 存于 sync_states.lastSyncAt），无则 null。
+final lastSyncAtProvider = FutureProvider<String?>((ref) {
+  return ref.watch(databaseProvider).getState(SyncStateKeys.lastSyncAt);
+});
+
 // ─────────────────────────── 高亮规则 ───────────────────────────
 
 final rawRulesProvider = StreamProvider<List<RuleRow>>((ref) {

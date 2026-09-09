@@ -13,6 +13,7 @@ import 'screens/library_screen.dart';
 import 'screens/reader_screen.dart';
 import 'screens/rules_screen.dart';
 import 'screens/settings_screen.dart';
+import 'screens/sync_center_screen.dart';
 import 'state/providers.dart';
 
 Future<void> main() async {
@@ -128,6 +129,7 @@ class _InkSyncAppState extends ConsumerState<InkSyncApp> with WidgetsBindingObse
         '/rules': (_) => const RulesScreen(),
         '/settings': (_) => const SettingsScreen(),
         '/import': (_) => const ImportScreen(),
+        '/sync-center': (_) => const SyncCenterScreen(),
       },
       onGenerateRoute: (settings) {
         if (settings.name == '/reader') {

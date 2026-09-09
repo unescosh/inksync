@@ -805,4 +805,51 @@ void main() {
     await a.close();
     await b.close();
   });
+
+  test('T11: 同步中心数据层（冲突可查/dismiss 后隐藏/pending 计数）', () async {
+    // 验证 SyncCenterScreen 依赖的查询：watchConflicts 只返回未处理项、
+    // dismissConflict 把条目移出列表、watchPendingOutboxCount 反映 outbox 行数。
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    await db.logConflict(
+      entityType: 'book',
+      entityId: 'b1',
+      field: 'title',
+      localValue: 'A版',
+      remoteValue: 'B版',
+      winner: 'remote',
+    );
+    await db.logConflict(
+      entityType: 'rule',
+      entityId: 'r1',
+      field: 'pattern',
+      localValue: 'x',
+      remoteValue: 'y',
+      winner: 'local',
+    );
+    await db.into(db.outbox).insert(OutboxCompanion.insert(
+      entityType: 'book',
+      entityId: 'b1',
+      op: 'upsert',
+      payloadJson: '{}',
+      hlc: '0001',
+    ));
+    await db.into(db.outbox).insert(OutboxCompanion.insert(
+      entityType: 'progress',
+      entityId: 'b1',
+      op: 'upsert',
+      payloadJson: '{}',
+      hlc: '0002',
+    ));
+
+    final conflicts = await db.watchConflicts().first;
+    expect(conflicts.length, 2, reason: '应查到 2 条未处理冲突');
+    final pending = await db.watchPendingOutboxCount().first;
+    expect(pending, 2, reason: '应有 2 条待推送');
+
+    await db.dismissConflict(conflicts.first.id);
+    final remaining = await db.watchConflicts().first;
+    expect(remaining.length, 1, reason: 'dismiss 后只剩 1 条冲突');
+
+    await db.close();
+  });
 }

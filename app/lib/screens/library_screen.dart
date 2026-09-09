@@ -105,6 +105,11 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
             onPressed: syncing ? null : ref.read(syncTriggerProvider.notifier).syncNow,
           ),
           IconButton(
+            icon: const Icon(Icons.hub_outlined),
+            tooltip: '同步中心',
+            onPressed: () => Navigator.of(context).pushNamed('/sync-center'),
+          ),
+          IconButton(
             icon: const Icon(Icons.settings_outlined),
             tooltip: '同步设置',
             onPressed: () => Navigator.of(context).pushNamed('/settings'),

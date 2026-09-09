@@ -240,6 +240,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           const SizedBox(height: 10),
           // 同步失败明细（若有）
           _ErrorList(report: last.valueOrNull),
+          const Divider(height: 28),
+          ListTile(
+            leading: const Icon(Icons.hub_outlined),
+            title: const Text('打开同步中心'),
+            subtitle: const Text('查看设备 / 待同步 / 冲突留痕'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.of(context).pushNamed('/sync-center'),
+          ),
         ],
       ),
     );
