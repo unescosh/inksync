@@ -18,6 +18,8 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::Result;
 use crate::model::{SyncReport, WebDavConfig};
 use crate::sha256_bytes;
@@ -479,6 +481,121 @@ pub fn list_remote<F: DavFs>(
     Ok((blobs, covers))
 }
 
+// ─────────────────────────── 端到端编排（供 CLI / 未来 Rust SyncEngine 复用） ───────────────────────────
+
+/// 本地目录 → 远端 的一次完整推送编排：scan_book_dir → pair_covers →
+/// transfer_blobs → transfer_covers。返回扫描到的书籍/封面条目，供调用方写本地索引。
+/// 纯 `DavFs` 抽象，故可用内存实现单测；真实 CLI 传 `WebDavClient`（`sync` feature）。
+pub fn sync_local_books<F, B, C>(
+    fs: &F,
+    cfg: &WebDavConfig,
+    remote_root: &str,
+    books_dir: &Path,
+    covers_dir: &Path,
+    blob_store: &B,
+    cover_store: &C,
+    report: &mut SyncReport,
+    mut on_downloaded: impl FnMut(&str, &Path),
+) -> Result<(Vec<BlobEntry>, Vec<CoverEntry>)>
+where
+    F: DavFs,
+    B: BlobStore,
+    C: CoverStore,
+{
+    let books = scan_book_dir(books_dir)?;
+    let covers = pair_covers(&books, covers_dir)?;
+    transfer_blobs(fs, cfg, remote_root, &books, blob_store, report, &mut on_downloaded)?;
+    transfer_covers(fs, cfg, remote_root, &covers, cover_store, report, &mut on_downloaded)?;
+    Ok((books, covers))
+}
+
+/// 远端 → 本地仓库 的一次完整拉取编排：list_remote 枚举内容寻址条目 →
+/// 构造 `local_path=None` 条目 → transfer_blobs / transfer_covers 把本地缺的拉回。
+pub fn pull_remote<F, B, C>(
+    fs: &F,
+    cfg: &WebDavConfig,
+    remote_root: &str,
+    blob_store: &B,
+    cover_store: &C,
+    report: &mut SyncReport,
+    mut on_downloaded: impl FnMut(&str, &Path),
+) -> Result<()>
+where
+    F: DavFs,
+    B: BlobStore,
+    C: CoverStore,
+{
+    let (blob_shas, cover_hashes) = list_remote(fs, cfg, remote_root)?;
+    let books: Vec<_> = blob_shas
+        .iter()
+        .map(|s| BlobEntry { title: s.clone(), sha256: s.clone(), local_path: None })
+        .collect();
+    let covers: Vec<_> = cover_hashes
+        .iter()
+        .map(|h| CoverEntry { title: h.clone(), cover_hash: h.clone(), local_path: None })
+        .collect();
+    transfer_blobs(fs, cfg, remote_root, &books, blob_store, report, &mut on_downloaded)?;
+    transfer_covers(fs, cfg, remote_root, &covers, cover_store, report, &mut on_downloaded)?;
+    Ok(())
+}
+
+/// 本地书籍索引清单（push 后写入 `<store>/book_index.json`）：把内容寻址的
+/// sha256 / coverHash 映射回人类可读的书名，便于无头备份后核对"备份了哪些书"。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BookIndexEntry {
+    pub title: String,
+    pub sha256: String,
+    #[serde(default)]
+    pub cover_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BookIndex {
+    #[serde(default)]
+    pub entries: Vec<BookIndexEntry>,
+}
+
+impl BookIndex {
+    /// 由扫描结果构造（封面按书名配对到书）。
+    pub fn from_scan(books: &[BlobEntry], covers: &[CoverEntry]) -> Self {
+        let mut entries = Vec::with_capacity(books.len());
+        for b in books {
+            let cover_hash = covers
+                .iter()
+                .find(|c| c.title == b.title)
+                .map(|c| c.cover_hash.clone());
+            entries.push(BookIndexEntry {
+                title: b.title.clone(),
+                sha256: b.sha256.clone(),
+                cover_hash,
+            });
+        }
+        Self { entries }
+    }
+
+    /// 写入 `<dir>/book_index.json`（覆盖式，原子：先 tmp 再 rename）。
+    pub fn write_to(&self, dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let json = serde_json::to_vec_pretty(self)
+            .map_err(|e| crate::error::Error::Other(format!("序列化索引失败：{e}")))?;
+        let dest = dir.join("book_index.json");
+        let tmp = dest.with_extension(format!("tmp-{}", nanos()));
+        std::fs::write(&tmp, &json)?;
+        std::fs::rename(&tmp, &dest)?;
+        Ok(())
+    }
+
+    /// 读取 `<dir>/book_index.json`；文件不存在返回空索引。
+    pub fn read_from(dir: &Path) -> Result<Self> {
+        let p = dir.join("book_index.json");
+        if !p.exists() {
+            return Ok(Self::default());
+        }
+        let s = std::fs::read_to_string(&p)?;
+        serde_json::from_str(&s).map_err(|e| crate::error::Error::Other(format!("解析索引失败：{e}")))
+    }
+}
+
 // ─────────────────────────── 单测（内存 WebDAV + 内存仓库，无需真实服务器） ───────────────────────────
 
 #[cfg(test)]
@@ -765,6 +882,79 @@ mod tests {
         transfer_covers(&dav, &cfg, "inksync", &covers, &cover_store, &mut rep2, |_, _| {}).unwrap();
         assert_eq!(rep2.uploaded_books, 0, "幂等：不应重复上传书");
         assert_eq!(rep2.uploaded_covers, 0, "幂等：不应重复上传封面");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `sync_local_books` 串起扫描→配对→推，并产出可读的本地索引清单。
+    #[test]
+    fn sync_local_books_writes_index() {
+        let base = std::env::temp_dir().join(format!("inksync_sync_{}", nanos()));
+        let books_dir = base.join("books");
+        let covers_dir = base.join("covers");
+        let store_dir = base.join("store");
+        std::fs::create_dir_all(&books_dir).unwrap();
+        std::fs::create_dir_all(&covers_dir).unwrap();
+        std::fs::write(books_dir.join("我的漫画.epub"), b"payload").unwrap();
+        std::fs::write(covers_dir.join("我的漫画.jpg"), jpeg_cover()).unwrap();
+
+        let dav = MemDav { store: RefCell::new(HashMap::new()) };
+        let cfg = cfg();
+        let bs = FsBlobStore::new(store_dir.clone());
+        let cs = FsCoverStore::new(store_dir.clone());
+        let mut rep = SyncReport::default();
+        let (books, covers) = sync_local_books(
+            &dav, &cfg, "inksync", &books_dir, &covers_dir, &bs, &cs, &mut rep, |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(rep.uploaded_books, 1);
+        assert_eq!(rep.uploaded_covers, 1);
+
+        let idx = BookIndex::from_scan(&books, &covers);
+        idx.write_to(&store_dir).unwrap();
+        let back = BookIndex::read_from(&store_dir).unwrap();
+        assert_eq!(back.entries.len(), 1, "索引应有 1 条");
+        assert_eq!(back.entries[0].title, "我的漫画");
+        assert_eq!(back.entries[0].sha256, books[0].sha256);
+        assert!(back.entries[0].cover_hash.is_some(), "索引应带封面哈希");
+        // 缺文件时读回空索引，不报错
+        assert!(BookIndex::read_from(&base.join("nope")).unwrap().entries.is_empty());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `pull_remote` 把远端有、本地缺的拉回，且幂等。
+    #[test]
+    fn pull_remote_downloads_missing_and_idempotent() {
+        let dav = MemDav { store: RefCell::new(HashMap::new()) };
+        let cfg = cfg();
+        let base = std::env::temp_dir().join(format!("inksync_pull_{}", nanos()));
+        let books_dir = base.join("books");
+        let covers_dir = base.join("covers");
+        std::fs::create_dir_all(&books_dir).unwrap();
+        std::fs::create_dir_all(&covers_dir).unwrap();
+        std::fs::write(books_dir.join("书A.epub"), b"remote payload").unwrap();
+        std::fs::write(covers_dir.join("书A.jpg"), jpeg_cover()).unwrap();
+        let src_store = FsBlobStore::new(base.join("src_store"));
+        let src_cstore = FsCoverStore::new(base.join("src_store"));
+        let mut rep1 = SyncReport::default();
+        sync_local_books(
+            &dav, &cfg, "inksync", &books_dir, &covers_dir, &src_store, &src_cstore, &mut rep1, |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(rep1.uploaded_books, 1);
+        assert_eq!(rep1.uploaded_covers, 1);
+
+        let dst_store = FsBlobStore::new(base.join("dst_store"));
+        let dst_cstore = FsCoverStore::new(base.join("dst_store"));
+        let mut rep2 = SyncReport::default();
+        pull_remote(&dav, &cfg, "inksync", &dst_store, &dst_cstore, &mut rep2, |_, _| {}).unwrap();
+        assert_eq!(rep2.downloaded_books, 1);
+        assert_eq!(rep2.downloaded_covers, 1);
+        let mut rep3 = SyncReport::default();
+        pull_remote(&dav, &cfg, "inksync", &dst_store, &dst_cstore, &mut rep3, |_, _| {}).unwrap();
+        assert_eq!(rep3.downloaded_books, 0, "幂等：不应重复下载");
+        assert_eq!(rep3.downloaded_covers, 0);
 
         let _ = std::fs::remove_dir_all(&base);
     }

@@ -39,8 +39,8 @@ use std::process::exit;
 use inksync_core::cli::load_env_file;
 use inksync_core::model::{SyncReport, WebDavConfig};
 use inksync_core::sync::transfer::{
-    CoverEntry, FsBlobStore, FsCoverStore, list_remote, pair_covers, scan_book_dir, transfer_blobs,
-    transfer_covers,
+    BookIndex, FsBlobStore, FsCoverStore, list_remote, pair_covers, pull_remote, scan_book_dir,
+    sync_local_books,
 };
 use inksync_core::sync::webdav::WebDavClient;
 
@@ -167,19 +167,26 @@ fn run() -> Result<(), String> {
     if args.mode == "push" {
         let books_dir = args.books.as_ref().unwrap();
         let covers_dir = args.covers.as_ref().unwrap();
-        let books = scan_book_dir(books_dir).map_err(|e| format!("扫描书目录失败：{e}"))?;
-        let covers = pair_covers(&books, covers_dir).map_err(|e| format!("配对封面失败：{e}"))?;
-        println!("扫描到 {} 本书、{} 张配对封面", books.len(), covers.len());
-
         let store = FsBlobStore::new(args.store.clone());
         let cover_store = FsCoverStore::new(args.store.clone());
-        // push 模式以本地为准：本地有、远端缺才上传；远端有则跳过（幂等）。
-        // on_downloaded 在 push 下通常不触发，置空即可。
-        transfer_blobs(&client, &cfg, &args.remote, &books, &store, &mut report, |_, _| {})
-            .map_err(|e| format!("传输书籍失败：{e}"))?;
-        transfer_covers(&client, &cfg, &args.remote, &covers, &cover_store, &mut report, |_, _| {})
-            .map_err(|e| format!("传输封面失败：{e}"))?;
-
+        // sync_local_books 内部：scan_book_dir → pair_covers → transfer_blobs/covers
+        let (books, covers) = sync_local_books(
+            &client,
+            &cfg,
+            &args.remote,
+            books_dir,
+            covers_dir,
+            &store,
+            &cover_store,
+            &mut report,
+            |_, _| {},
+        )
+        .map_err(|e| format!("推送失败：{e}"))?;
+        // 写本地索引：把内容寻址哈希映射回书名，便于核对"备份了哪些书"
+        BookIndex::from_scan(&books, &covers)
+            .write_to(&args.store)
+            .map_err(|e| format!("写本地索引失败：{e}"))?;
+        println!("已写本地索引：{}", args.store.join("book_index.json").display());
         println!(
             "推送完成：上传书 {} / 下载书 {} / 上传封面 {} / 下载封面 {} / 错误 {}",
             report.uploaded_books,
@@ -189,43 +196,21 @@ fn run() -> Result<(), String> {
             report.errors.len()
         );
     } else {
-        // pull：把远端有、本地仓库缺的按内容寻址拉回 --store
-        let (blob_shas, cover_hashes) =
-            list_remote(&client, &cfg, &args.remote).map_err(|e| format!("枚举远端失败：{e}"))?;
-        println!(
-            "远端共 {} 个 blobs、{} 个 covers，开始拉取本地仓库缺失项",
-            blob_shas.len(),
-            cover_hashes.len()
-        );
-
-        let books: Vec<_> = blob_shas
-            .iter()
-            .map(|sha| inksync_core::sync::transfer::BlobEntry {
-                title: sha.clone(),
-                sha256: sha.clone(),
-                local_path: None,
-            })
-            .collect();
-        let covers: Vec<_> = cover_hashes
-            .iter()
-            .map(|h| CoverEntry {
-                title: h.clone(),
-                cover_hash: h.clone(),
-                local_path: None,
-            })
-            .collect();
-
         let store = FsBlobStore::new(args.store.clone());
         let cover_store = FsCoverStore::new(args.store.clone());
-        transfer_blobs(&client, &cfg, &args.remote, &books, &store, &mut report, |sha, p| {
-            println!("  拉回书：{sha} -> {}", p.display());
-        })
-        .map_err(|e| format!("拉取书籍失败：{e}"))?;
-        transfer_covers(&client, &cfg, &args.remote, &covers, &cover_store, &mut report, |h, p| {
-            println!("  拉回封面：{h} -> {}", p.display());
-        })
-        .map_err(|e| format!("拉取封面失败：{e}"))?;
-
+        // pull_remote 内部：list_remote → 构造条目 → transfer_blobs/covers（拉回本地缺的）
+        pull_remote(
+            &client,
+            &cfg,
+            &args.remote,
+            &store,
+            &cover_store,
+            &mut report,
+            |sha, p| {
+                println!("  拉回书：{sha} -> {}", p.display());
+            },
+        )
+        .map_err(|e| format!("拉取失败：{e}"))?;
         println!(
             "拉取完成：下载书 {} / 下载封面 {} / 错误 {}",
             report.downloaded_books, report.downloaded_covers, report.errors.len()
