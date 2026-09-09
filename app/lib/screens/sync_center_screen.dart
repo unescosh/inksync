@@ -89,6 +89,7 @@ class _StatusCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final r = report;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -138,7 +139,6 @@ class _StatusCard extends StatelessWidget {
                 data: (v) => v == null ? '尚未同步' : _formatTime(v),
               ),
             ),
-            final r = report;
             if (r != null && r.ok) ...[
               const SizedBox(height: 8),
               Text(
