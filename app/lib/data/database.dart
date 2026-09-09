@@ -727,4 +727,9 @@ class SyncStateKeys {
   static const pendingTransfers = 'pendingTransfers';
   static const sortSpec = 'pref.sortSpec'; // 本地偏好，不同步
   static const groupSpec = 'pref.groupSpec';
+  // PM#5 自动同步轮询偏好（本地，不同步）
+  static const autoSync = 'pref.autoSync'; // '1' 开（默认）/ '0' 关
+  static const syncIntervalMin = 'pref.syncIntervalMin'; // 轮询间隔（分钟），默认 5
+  static const syncWifiOnly = 'pref.syncWifiOnly'; // '1' 仅 Wi-Fi 下同步
+  static const syncChargingOnly = 'pref.syncChargingOnly'; // '1' 仅充电时同步
 }

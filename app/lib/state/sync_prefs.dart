@@ -1,7 +1,6 @@
 import 'dart:math' as math;
 
 import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:drift/drift.dart';
 
 import '../data/database.dart';
 

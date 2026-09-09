@@ -264,7 +264,7 @@ class PollingController extends Notifier<PollingInfo> {
     if (prefs.chargingOnly) {
       BatteryState st;
       try {
-        st = await Battery().state.first;
+        st = await Battery().batteryState;
       } catch (_) {
         st = BatteryState.full; // 查不到就放行
       }
