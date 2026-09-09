@@ -387,32 +387,40 @@ class _CollectionsPane extends ConsumerWidget {
                       title: Text(list[i].name, maxLines: 1, overflow: TextOverflow.ellipsis),
                       selected: selectedId == list[i].id,
                       onTap: () => onSelect(list[i].id),
-                      trailing: IconButton(
-                        icon: const Icon(Icons.delete_outline, size: 20),
-                        tooltip: '删除分组',
-                        onPressed: () async {
-                          final ok = await showDialog<bool>(
-                            context: context,
-                            builder: (ctx) => AlertDialog(
-                              title: const Text('删除分组'),
-                              content: Text('确定删除「${list[i].name}」？分组内的书不会删除，只是移出该分组。'),
-                              actions: [
-                                TextButton(
-                                  onPressed: () => Navigator.of(ctx).pop(false),
-                                  child: const Text('取消'),
-                                ),
-                                FilledButton(
-                                  onPressed: () => Navigator.of(ctx).pop(true),
-                                  child: const Text('删除'),
-                                ),
-                              ],
-                            ),
-                          );
-                          if (ok == true) {
-                            await ref.read(libraryActionsProvider).deleteCollection(list[i].id);
-                            if (selectedId == list[i].id) onSelect(null);
+                      trailing: PopupMenuButton<String>(
+                        icon: const Icon(Icons.more_vert, size: 20),
+                        tooltip: '分组操作',
+                        onSelected: (v) async {
+                          if (v == 'rename') {
+                            await _renameCollection(context, ref, list[i]);
+                          } else if (v == 'delete') {
+                            final ok = await showDialog<bool>(
+                              context: context,
+                              builder: (ctx) => AlertDialog(
+                                title: const Text('删除分组'),
+                                content: Text('确定删除「${list[i].name}」？分组内的书不会删除，只是移出该分组。'),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () => Navigator.of(ctx).pop(false),
+                                    child: const Text('取消'),
+                                  ),
+                                  FilledButton(
+                                    onPressed: () => Navigator.of(ctx).pop(true),
+                                    child: const Text('删除'),
+                                  ),
+                                ],
+                              ),
+                            );
+                            if (ok == true) {
+                              await ref.read(libraryActionsProvider).deleteCollection(list[i].id);
+                              if (selectedId == list[i].id) onSelect(null);
+                            }
                           }
                         },
+                        itemBuilder: (_) => const [
+                          PopupMenuItem(value: 'rename', child: Text('重命名')),
+                          PopupMenuItem(value: 'delete', child: Text('删除')),
+                        ],
                       ),
                     ),
                   ),
@@ -428,6 +436,36 @@ class _CollectionsPane extends ConsumerWidget {
       ],
     );
   }
+}
+
+Future<void> _renameCollection(
+  BuildContext context,
+  WidgetRef ref,
+  CollectionRow row,
+) async {
+  final controller = TextEditingController(text: row.name);
+  final name = await showDialog<String>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('重命名分组'),
+      content: TextField(
+        controller: controller,
+        autofocus: true,
+        decoration: const InputDecoration(hintText: '分组名称'),
+        onSubmitted: (v) => Navigator.of(ctx).pop(v.trim()),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('取消')),
+        FilledButton(
+          onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+          child: const Text('保存'),
+        ),
+      ],
+    ),
+  );
+  controller.dispose();
+  if (name == null || name.isEmpty || name == row.name) return;
+  await ref.read(libraryActionsProvider).renameCollection(id: row.id, name: name);
 }
 
 Future<String?> _createCollection(BuildContext context, WidgetRef ref) async {

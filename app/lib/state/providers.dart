@@ -595,6 +595,40 @@ class LibraryActions {
     _ref.read(syncTriggerProvider.notifier).markDirty();
   }
 
+  /// 重命名分组（同步实体，写 outbox）。
+  ///
+  /// payload 只带 `name`：三方合并时远端没带的字段（sortOrder/emoji/color/deleted）
+  /// 会保留对端本地值，不会被稀疏 payload 清掉（见 merge.dart 的 mergeEntity）。
+  Future<void> renameCollection({
+    required String id,
+    required String name,
+  }) async {
+    final db = _ref.read(databaseProvider);
+    final clock = await _ref.read(hlcClockProvider.future);
+    final deviceId = await _ref.read(deviceIdProvider.future);
+    final hlc = clock.tick();
+    await (db.update(db.collections)..where((t) => t.id.equals(id))).write(
+      CollectionsCompanion(
+        name: Value(name),
+        hlc: Value(hlc.encode()),
+        updatedBy: Value(deviceId),
+      ),
+    );
+    await db.into(db.outbox).insert(OutboxCompanion.insert(
+      entityType: 'collection',
+      entityId: id,
+      op: 'upsert',
+      payloadJson: jsonEncode({
+        'id': id,
+        'name': name,
+        'hlc': hlc.encode(),
+        'updatedBy': deviceId,
+      }),
+      hlc: hlc.encode(),
+    ));
+    _ref.read(syncTriggerProvider.notifier).markDirty();
+  }
+
   /// 把书加入 / 移出分组。移出用 `removed=true` 软删，同样是防"复活"。
   Future<void> setMembership({
     required String bookId,

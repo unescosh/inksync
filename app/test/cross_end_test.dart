@@ -746,4 +746,63 @@ void main() {
     await a.close();
     await b.close();
   });
+
+  test('T10: 分组重命名跨端同步且保留其它字段（稀疏 payload 不清字段）', () async {
+    // 验证 LibraryActions.renameCollection 的稀疏 payload（只带 name）经三方合并后，
+    // 对端本地的 sortOrder/emoji 等未改字段不被清掉（merge.dart mergeEntity 的行为）。
+    final a = AppDatabase.forTesting(NativeDatabase.memory());
+    final b = AppDatabase.forTesting(NativeDatabase.memory());
+    final client = MockWebDavClient();
+    final h = Hlc(wallMs: 1000, counter: 0, node: 'aaaaaaaa');
+    const colId = 'col-rename';
+
+    // 两端基线同一 id 的分组；B 端额外带 sortOrder=5 + emoji，用来验证不被清掉
+    for (final db in [a, b]) {
+      final isB = db == b;
+      await db.into(db.collections).insert(CollectionsCompanion.insert(
+        id: colId,
+        name: '旧名字',
+        sortOrder: Value(isB ? 5 : 0),
+        emoji: Value(isB ? '📚' : null),
+        hlc: h.encode(),
+        updatedBy: 'aaaaaaaa',
+      ));
+      await db.setState(
+          'base.collection.$colId',
+          jsonEncode({
+            'id': colId,
+            'name': '旧名字',
+            'sortOrder': isB ? 5 : 0,
+            'emoji': isB ? '📚' : null,
+            'hlc': h.encode(),
+            'updatedBy': 'aaaaaaaa'
+          }));
+    }
+
+    // A 重命名（只发 name 的稀疏 outbox，与 LibraryActions.renameCollection 同款）
+    final h2 = Hlc(wallMs: 2000, counter: 0, node: 'aaaaaaaa');
+    await (a.update(a.collections)..where((t) => t.id.equals(colId))).write(
+      CollectionsCompanion(
+        name: const Value('新名字'),
+        hlc: Value(h2.encode()),
+        updatedBy: const Value('aaaaaaaa'),
+      ),
+    );
+    await enqueueRaw(a, 'collection', colId, 'upsert',
+        {'id': colId, 'name': '新名字', 'hlc': h2.encode(), 'updatedBy': 'aaaaaaaa'}, h2.encode());
+
+    await makeEngine(a, client, 'aaaaaaaa').sync();
+    final repB = await makeEngine(b, client, 'bbbbbbbb').sync();
+    expect(repB.ok, isTrue);
+
+    final bCol = await (b.select(b.collections)
+        ..where((t) => t.id.equals(colId)))
+        .getSingle();
+    expect(bCol.name, '新名字', reason: '分组名应跨端更新');
+    expect(bCol.sortOrder, 5, reason: 'T10: 稀疏重命名不应清掉 B 端的 sortOrder');
+    expect(bCol.emoji, '📚', reason: 'T10: 稀疏重命名不应清掉 B 端的 emoji');
+
+    await a.close();
+    await b.close();
+  });
 }
