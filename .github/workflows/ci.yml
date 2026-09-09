@@ -75,5 +75,8 @@ jobs:
       # windows-latest 预装 MSYS2，mingw64 的 gcc/ar 在 C:\msys64\mingw64\bin
       - name: 配置 PATH（mingw64）
         run: echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+      # 只编 rlib + staticlib：cli_backup 示例只需要 rlib。cdylib（Windows .dll / Linux .so）
+      # 在 sync feature 下依赖树巨大，mingw 的 16 位导出序号上限（65535）会触发
+      # "export ordinal too large"，与本示例无关——用 --config 关掉 cdylib 即可绕过。
       - name: cargo build cli_backup (sync feature)
-        run: cargo build --features sync --example cli_backup --target x86_64-pc-windows-gnu
+        run: cargo build --features sync --example cli_backup --target x86_64-pc-windows-gnu --config 'lib.crate-type=["lib","staticlib"]'
