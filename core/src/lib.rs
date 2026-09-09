@@ -4,6 +4,10 @@ pub mod highlight;
 pub mod model;
 pub mod sync;
 
+/// 无头 CLI 小工具（`.env` 配置解析），默认 features、纯 std，可在沙箱/CI 默认
+/// `cargo test` 下单测；example `cli_backup` 通过它与 `sync` feature 的 WebDAV 客户端组合。
+pub mod cli;
+
 #[cfg(feature = "frb")]
 pub mod api;
 

@@ -18,15 +18,25 @@
 //!     --store /path/to/local_store \
 //!     --url https://dav.example.com/inksync/ \
 //!     --user alice --pass secret
+//!
+//! # 用配置文件（避免命令行明文传密码）；命令行参数优先级高于配置文件
+//! # .env 形如：INKSYNC_URL=...  INKSYNC_USER=...  INKSYNC_PASS=...
+//! #           INKSYNC_BOOKS=...  INKSYNC_COVERS=...  INKSYNC_STORE=...  INKSYNC_REMOTE=...
+//! cargo run --features sync --example cli_backup -- push --config ./inksync.env
+//!
+//! # 试跑：只打印将要上传/下载的内容，不触碰远端
+//! cargo run --features sync --example cli_backup -- push --config ./inksync.env --dry-run
 //! ```
 //!
 //! 远端布局（与 Dart 引擎一致，内容寻址）：
 //! `inksync/blobs/<sha[:2]>/<sha>`、`inksync/covers/<hash[:2]>/<hash>`。
 //! 同名即同内容，天然幂等、免冲突、支持秒传。
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::exit;
 
+use inksync_core::cli::load_env_file;
 use inksync_core::model::{SyncReport, WebDavConfig};
 use inksync_core::sync::transfer::{
     CoverEntry, FsBlobStore, FsCoverStore, list_remote, pair_covers, scan_book_dir, transfer_blobs,
@@ -44,6 +54,8 @@ struct Args {
     pass: String,
     remote: String,
     accept_invalid_certs: bool,
+    config: Option<PathBuf>,
+    dry_run: bool,
 }
 
 fn parse_args() -> Args {
@@ -57,6 +69,8 @@ fn parse_args() -> Args {
         pass: String::new(),
         remote: "inksync".into(),
         accept_invalid_certs: false,
+        config: None,
+        dry_run: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(tok) = it.next() {
@@ -69,6 +83,8 @@ fn parse_args() -> Args {
             "--user" => a.user = it.next().unwrap_or_default(),
             "--pass" => a.pass = it.next().unwrap_or_default(),
             "--remote" => a.remote = it.next().unwrap_or_else(|| "inksync".into()),
+            "--config" | "--env" => a.config = it.next().map(PathBuf::from),
+            "--dry-run" => a.dry_run = true,
             "--accept-invalid-certs" => a.accept_invalid_certs = true,
             other => {
                 eprintln!("未知参数：{other}");
@@ -76,15 +92,53 @@ fn parse_args() -> Args {
             }
         }
     }
-    if a.url.is_empty() {
-        eprintln!("缺少 --url（WebDAV 基址）");
-        exit(2);
-    }
-    if a.mode == "push" && (a.books.is_none() || a.covers.is_none()) {
-        eprintln!("push 模式需要 --books 与 --covers");
-        exit(2);
-    }
     a
+}
+
+/// 用配置文件（KEY=VALUE）填充命令行未给出的字段；命令行参数优先级更高。
+fn apply_config(args: &mut Args) -> Result<(), String> {
+    let Some(cfg_path) = args.config.clone() else {
+        return Ok(());
+    };
+    let env: HashMap<String, String> =
+        load_env_file(&cfg_path).map_err(|e| format!("读取配置文件 {} 失败：{e}", cfg_path.display()))?;
+    if args.url.is_empty() {
+        args.url = env.get("INKSYNC_URL").cloned().unwrap_or_default();
+    }
+    if args.user.is_empty() {
+        args.user = env.get("INKSYNC_USER").cloned().unwrap_or_default();
+    }
+    if args.pass.is_empty() {
+        args.pass = env.get("INKSYNC_PASS").cloned().unwrap_or_default();
+    }
+    if args.books.is_none() {
+        args.books = env.get("INKSYNC_BOOKS").map(PathBuf::from);
+    }
+    if args.covers.is_none() {
+        args.covers = env.get("INKSYNC_COVERS").map(PathBuf::from);
+    }
+    if args.store == PathBuf::from("inksync_store") {
+        if let Some(s) = env.get("INKSYNC_STORE") {
+            args.store = PathBuf::from(s);
+        }
+    }
+    if args.remote == "inksync" {
+        if let Some(r) = env.get("INKSYNC_REMOTE") {
+            args.remote = r.clone();
+        }
+    }
+    Ok(())
+}
+
+fn validate(args: &Args) {
+    if args.url.is_empty() {
+        eprintln!("缺少 --url（或配置文件 INKSYNC_URL）：WebDAV 基址");
+        exit(2);
+    }
+    if args.mode == "push" && (args.books.is_none() || args.covers.is_none()) {
+        eprintln!("push 模式需要 --books 与 --covers（或配置文件 INKSYNC_BOOKS / INKSYNC_COVERS）");
+        exit(2);
+    }
 }
 
 fn cfg(args: &Args) -> WebDavConfig {
@@ -98,7 +152,14 @@ fn cfg(args: &Args) -> WebDavConfig {
 }
 
 fn run() -> Result<(), String> {
-    let args = parse_args();
+    let mut args = parse_args();
+    apply_config(&mut args)?;
+    validate(&args);
+
+    if args.dry_run {
+        return dry_run(&args);
+    }
+
     let cfg = cfg(&args);
     let client = WebDavClient::new(&cfg).map_err(|e| format!("创建 WebDAV 客户端失败：{e}"))?;
     let mut report = SyncReport::default();
@@ -177,6 +238,44 @@ fn run() -> Result<(), String> {
             eprintln!("  - {e}");
         }
         exit(1);
+    }
+    Ok(())
+}
+
+/// 试跑：只打印将要上传/下载的内容，不触碰远端（push 完全本地；pull 只读远端枚举）。
+fn dry_run(args: &Args) -> Result<(), String> {
+    if args.mode == "push" {
+        let books_dir = args.books.as_ref().unwrap();
+        let covers_dir = args.covers.as_ref().unwrap();
+        let books = scan_book_dir(books_dir).map_err(|e| format!("扫描书目录失败：{e}"))?;
+        let covers = pair_covers(&books, covers_dir).map_err(|e| format!("配对封面失败：{e}"))?;
+        println!("[dry-run] 将推送 {} 本书、{} 张配对封面到远端根 `{}`：", books.len(), covers.len(), args.remote);
+        for b in &books {
+            println!("  book: 《{}》 sha256={}", b.title, b.sha256);
+        }
+        for c in &covers {
+            println!("  cover: 《{}》 coverHash={}", c.title, c.cover_hash);
+        }
+        println!("[dry-run] 未做任何网络写入。去掉 --dry-run 正式推送。");
+    } else {
+        let cfg = cfg(args);
+        let client = WebDavClient::new(&cfg).map_err(|e| format!("创建 WebDAV 客户端失败：{e}"))?;
+        let (blob_shas, cover_hashes) =
+            list_remote(&client, &cfg, &args.remote).map_err(|e| format!("枚举远端失败：{e}"))?;
+        println!(
+            "[dry-run] 远端根 `{}` 共 {} 个 blobs、{} 个 covers；将把本地仓库缺的拉回 `{}`：",
+            args.remote,
+            blob_shas.len(),
+            cover_hashes.len(),
+            args.store.display()
+        );
+        for s in &blob_shas {
+            println!("  blob: {s}");
+        }
+        for h in &cover_hashes {
+            println!("  cover: {h}");
+        }
+        println!("[dry-run] 未做下载。去掉 --dry-run 正式拉取。");
     }
     Ok(())
 }
