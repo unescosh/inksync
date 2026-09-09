@@ -238,8 +238,9 @@ class AppDatabase extends _$AppDatabase {
         },
         beforeOpen: (details) async {
           await customStatement('PRAGMA foreign_keys = ON');
-          // 同步依赖"按 hlc 扫描未推送记录"，这个索引是热点
-          await customStatement('CREATE INDEX IF NOT EXISTS idx_outbox_hlc ON outbox(hlc)');
+          // 同步热点索引：books.hlc 用于排序/合并时的扫描；annotations.book_id
+          // 用于"按书列出批注"的回显。idx_outbox_hlc 已在 T2 后随 pendingOutbox
+          // 改为"按 seq 全量取"而废弃，已移除（见 docs/08 P3）。
           await customStatement('CREATE INDEX IF NOT EXISTS idx_books_hlc ON books(hlc)');
           await customStatement(
             'CREATE INDEX IF NOT EXISTS idx_annotations_book ON annotations(book_id)',

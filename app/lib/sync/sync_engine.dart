@@ -397,7 +397,6 @@ class SyncEngine {
   Future<void> _applyRecord(Map<String, dynamic> rec, SyncReport report) async {
     final type = rec['t'] as String?;
     final id = rec['id'] as String?;
-    final op = rec['op'] as String?;
     final hlcStr = rec['hlc'] as String?;
     final node = rec['node'] as String? ?? '';
     if (type == null || id == null || hlcStr == null) return;
@@ -411,7 +410,6 @@ class SyncEngine {
           table: 'book',
           id: id,
           remote: (rec['d'] as Map?)?.cast<String, dynamic>(),
-          op: op,
           remoteHlc: remoteHlc,
           node: node,
           report: report,
@@ -428,7 +426,6 @@ class SyncEngine {
           table: 'progress',
           id: id,
           remote: (rec['d'] as Map?)?.cast<String, dynamic>(),
-          op: op,
           remoteHlc: remoteHlc,
           node: node,
           report: report,
@@ -448,7 +445,6 @@ class SyncEngine {
           table: 'rule',
           id: id,
           remote: (rec['d'] as Map?)?.cast<String, dynamic>(),
-          op: op,
           remoteHlc: remoteHlc,
           node: node,
           report: report,
@@ -465,7 +461,6 @@ class SyncEngine {
           table: 'collection',
           id: id,
           remote: (rec['d'] as Map?)?.cast<String, dynamic>(),
-          op: op,
           remoteHlc: remoteHlc,
           node: node,
           report: report,
@@ -484,7 +479,6 @@ class SyncEngine {
           table: 'membership',
           id: id,
           remote: (rec['d'] as Map?)?.cast<String, dynamic>(),
-          op: op,
           remoteHlc: remoteHlc,
           node: node,
           report: report,
@@ -504,7 +498,6 @@ class SyncEngine {
           table: 'annotation',
           id: id,
           remote: (rec['d'] as Map?)?.cast<String, dynamic>(),
-          op: op,
           remoteHlc: remoteHlc,
           node: node,
           report: report,
@@ -526,7 +519,6 @@ class SyncEngine {
     required String table,
     required String id,
     required Map<String, dynamic>? remote,
-    required String? op,
     required Hlc remoteHlc,
     required String node,
     required SyncReport report,
@@ -1021,7 +1013,6 @@ AnnotationsCompanion _annotationCompanion(Map<String, dynamic> m) => Annotations
       hlc: m['hlc'] as String? ?? Hlc.zero.encode(),
       updatedBy: m['updatedBy'] as String? ?? '',
       deleted: Value(m['deleted'] == true),
-      baseJson: Value(m['baseJson'] as String?),
     );
 
 extension _FirstOrNullEtag on List<DavEntry> {

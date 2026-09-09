@@ -783,7 +783,6 @@ class AnnotationActions {
             hlc: hlc.encode(),
             updatedBy: deviceId,
             deleted: const Value(false),
-            baseJson: const Value(null),
           ),
         );
     await db.into(db.outbox).insert(
