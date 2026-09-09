@@ -84,6 +84,29 @@ INKSYNC_STORE=/srv/inksync/store
 `verify_store_detects_corruption` 用例覆盖"完好放过 / 损坏抓出"）。建议把 `verify` 接在
 定时备份之后跑，损坏即告警。
 
+### 孤儿回收（gc，不需要网络）
+
+删书 / 换书后，本地仓库里会留下"没有任何书引用"的孤立 blob 与封面（内容寻址文件名仍
+在，但没有对应的 `book_index.json` 条目）。`gc` 以 `store/book_index.json` 为白名单，
+删除白名单之外的 blob / 封面，回收磁盘空间——**只删无引用文件、绝不删白名单内文件、不动远端**：
+
+```bash
+./cli_backup gc --store /srv/inksync/store
+# 输出示例：
+# 已回收 2 个无引用条目（3/ ……/blobs 本书仍被保留）。
+```
+
+安全边界（实现见 `core/src/sync/transfer.rs` 的 `gc_store`，默认 features、可在沙箱/CI 单测，
+`gc_store_removes_only_orphans` 用例覆盖"只删孤儿 / 保住在用书 / 跳过 .tmp- 临时文件"）：
+
+- **白名单来源**：`<store>/book_index.json`。索引为空或不存在时 `gc` 直接中止（exit 1），避免误删
+  全部内容——所以请先 `push`/`pull` 生成索引再 `gc`。
+- **匹配方式**：blob 文件名（内容寻址 sha256）必须在某条目的 `sha256` 中；封面文件名（去扩展名）
+  必须在某条目的 `cover_hash` 中。否则视为孤儿。
+- **建议顺序**：先 `verify` 确认无损坏，再 `gc`；因为 `gc` 只看白名单、不校验内容，若某文件
+  内容已损坏但文件名恰好在白名单里，它会被"保住"而非删除（损坏交给 `verify` 告警）。
+- **幂等**：再跑一次 `gc`，白名单外的文件已删光，返回 0，不会重复删除或报错。
+
 ### 与 App 本地仓库对齐（关键）
 CLI 的落盘布局**刻意与 App 对齐**，这样把 `--store` 指向 App 的文档目录后，CLI 拉回的内容
 App 能直接读到，无需改数据库：

@@ -30,6 +30,10 @@
 //! # 校验本地仓库完整性（不需要网络；逐个重算 sha256 比对内容寻址文件名，
 //! # 抓出磁盘静默损坏 / 半截文件；有损坏时以非 0 退出码结束，便于定时任务判定）
 //! cargo run --features sync --example cli_backup -- verify --store /path/to/local_store
+//!
+//! # 回收孤儿：删书后未清理的本地仓库里，删掉没有任何书引用的 blob / 封面
+//! # （以 <store>/book_index.json 为白名单；不需要网络；建议先 verify 再 gc）
+//! cargo run --features sync --example cli_backup -- gc --store /path/to/local_store
 //! ```
 //!
 //! 远端布局（与 Dart 引擎一致，内容寻址）：
@@ -43,8 +47,8 @@ use std::process::exit;
 use inksync_core::cli::load_env_file;
 use inksync_core::model::{SyncReport, WebDavConfig};
 use inksync_core::sync::transfer::{
-    BookIndex, FsBlobStore, FsCoverStore, list_remote, pair_covers, pull_remote, scan_book_dir,
-    sync_local_books, verify_store,
+    BookIndex, FsBlobStore, FsCoverStore, gc_store, list_remote, pair_covers, pull_remote,
+    scan_book_dir, sync_local_books, verify_store,
 };
 use inksync_core::sync::webdav::WebDavClient;
 
@@ -79,7 +83,7 @@ fn parse_args() -> Args {
     let mut it = std::env::args().skip(1);
     while let Some(tok) = it.next() {
         match tok.as_str() {
-            "push" | "pull" | "verify" => a.mode = tok,
+            "push" | "pull" | "verify" | "gc" => a.mode = tok,
             "--books" => a.books = it.next().map(PathBuf::from),
             "--covers" => a.covers = it.next().map(PathBuf::from),
             "--store" => a.store = it.next().map(PathBuf::from).unwrap_or(a.store),
@@ -162,6 +166,11 @@ fn run() -> Result<(), String> {
     // verify 是纯本地自检，不需要网络，也不依赖 push/pull 的 --url 校验
     if args.mode == "verify" {
         return verify_store_cmd(&args);
+    }
+
+    // gc 是纯本地孤儿回收，不需要网络；以 BookIndex 为白名单删掉无引用的 blob/封面
+    if args.mode == "gc" {
+        return gc_store_cmd(&args);
     }
 
     validate(&args);
@@ -294,6 +303,32 @@ fn verify_store_cmd(args: &Args) -> Result<(), String> {
         eprintln!("  {}  预期={expected} 实际={actual}", path.display());
     }
     exit(1);
+}
+
+/// 回收本地仓库里"没有任何书引用"的孤立 blob / 封面。
+/// 以 `<store>/book_index.json` 为白名单：不在其中的内容寻址文件即孤儿，删除。
+/// 不需要网络；建议先 `verify` 确认无损坏再 `gc`，避免误删内容不符（但文件名在白名单）的文件。
+fn gc_store_cmd(args: &Args) -> Result<(), String> {
+    let index = BookIndex::read_from(&args.store)
+        .map_err(|e| format!("读取本地索引 {} 失败：{e}", args.store.join("book_index.json").display()))?;
+    if index.entries.is_empty() {
+        eprintln!(
+            "⚠️ 本地索引 {} 为空或不存在——为避免误删全部内容，gc 已中止。请先 push/pull 生成索引。",
+            args.store.join("book_index.json").display()
+        );
+        exit(1);
+    }
+    let store = FsBlobStore::new(args.store.clone());
+    let cover_store = FsCoverStore::new(args.store.clone());
+    let removed = gc_store(&store, &cover_store, &index)
+        .map_err(|e| format!("回收失败：{e}"))?;
+    println!(
+        "已回收 {} 个无引用条目（{}/{} 本书仍被保留）。",
+        removed,
+        index.entries.len(),
+        args.store.join("blobs").display()
+    );
+    Ok(())
 }
 
 fn main() {

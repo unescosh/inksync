@@ -15,6 +15,7 @@
 //!    下载后校验 sha256，不符则丢弃（绝不写入本地）。这正好让
 //!    `SyncReport.uploaded_covers` / `downloaded_covers` 字段从"暂不使用"变为真正产出。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -468,6 +469,56 @@ fn walk_files(dir: &Path) -> Result<Vec<std::fs::DirEntry>> {
         }
     }
     Ok(out)
+}
+
+// ─────────────────────────── 本地仓库孤儿回收（gc） ───────────────────────────
+//
+// 书被删除后，其 blob / 封面不会自动从本地仓库消失——内容寻址决定一个文件可能被多本书
+// 共享，删某本书不能贸然删文件。以 `BookIndex` 为"仍被引用"的白名单做 GC：文件名
+// （内容寻址键）不在白名单中的即孤儿，删除。建议先 `verify` 再 `gc`。
+
+/// 回收本地仓库里"没有任何书引用"的孤立 blob / 封面。
+///
+/// 以 [BookIndex] 为白名单：文件名（内容寻址键）不在白名单中的文件即孤儿，删除。
+/// 返回移除的条目数。安全边界：只删白名单外文件、绝不删白名单内文件、不动远端。
+pub fn gc_store(blob_store: &FsBlobStore, cover_store: &FsCoverStore, index: &BookIndex) -> Result<usize> {
+    let referenced_blobs: HashSet<&str> =
+        index.entries.iter().map(|e| e.sha256.as_str()).collect();
+    let referenced_covers: HashSet<&str> = index
+        .entries
+        .iter()
+        .filter_map(|e| e.cover_hash.as_deref())
+        .collect();
+
+    let mut removed = 0;
+
+    for e in walk_files(&blob_store.root.join("blobs"))? {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.contains(".tmp-") {
+            continue;
+        }
+        if !referenced_blobs.contains(name.as_str()) {
+            std::fs::remove_file(e.path())?;
+            removed += 1;
+        }
+    }
+
+    for e in walk_files(&cover_store.cover_dir())? {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.contains(".tmp-") {
+            continue;
+        }
+        let hash = match name.rfind('.') {
+            Some(i) => name[..i].to_string(),
+            None => name.clone(),
+        };
+        if !referenced_covers.contains(hash.as_str()) {
+            std::fs::remove_file(e.path())?;
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
 }
 
 // ─────────────────────────── 无头 CLI 辅助（扫描本地目录 → 传输条目） ───────────────────────────
@@ -1059,6 +1110,64 @@ mod tests {
         assert_eq!(v.covers_ok, 1, "1 完好 1 损坏");
         assert!(!v.ok(), "存在损坏，ok() 应为 false");
         assert_eq!(v.corrupted.len(), 2, "损坏清单应有 2 条");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 孤儿回收：只删白名单（BookIndex）外的孤立 blob / 封面，保住被引用的，返回移除数。
+    /// 删书后未清理的本地仓库，`gc` 应把多余内容寻址文件回收掉，且绝不误删在用书。
+    #[test]
+    fn gc_store_removes_only_orphans() {
+        let base = std::env::temp_dir().join(format!("inksync_gc_{}", nanos()));
+        std::fs::create_dir_all(&base).unwrap();
+        let bs = FsBlobStore::new(base.join("store"));
+        let cs = FsCoverStore::new(base.join("store"));
+
+        // 被引用的 blob（文件名 == sha256）
+        let good = base.join("good.bin");
+        std::fs::write(&good, b"keep me").unwrap();
+        let good_sha = crate::sha256_file(&good).unwrap();
+        let _ = bs.import_file(&good, &good_sha).unwrap();
+
+        // 被引用的封面
+        let cover_src = base.join("cover.bin");
+        std::fs::write(&cover_src, jpeg_cover()).unwrap();
+        let cover_hash = sha256_bytes(&jpeg_cover());
+        let _ = cs.import_file(&cover_src, &cover_hash, ".jpg").unwrap();
+
+        // 孤儿 blob：不在白名单里
+        let orphan_sha = "ab".repeat(32);
+        let orphan_blob_dir = base.join("store").join("blobs").join(&orphan_sha[..2]);
+        std::fs::create_dir_all(&orphan_blob_dir).unwrap();
+        std::fs::write(orphan_blob_dir.join(&orphan_sha), b"orphan blob").unwrap();
+
+        // 孤儿封面
+        let orphan_cover_hash = "cd".repeat(32);
+        let orphan_cover_dir = cs.cover_dir();
+        std::fs::create_dir_all(&orphan_cover_dir).unwrap();
+        std::fs::write(orphan_cover_dir.join(format!("{orphan_cover_hash}.jpg")), b"orphan cover").unwrap();
+
+        // 白名单只有被引用的那一本
+        let index = BookIndex {
+            entries: vec![BookIndexEntry {
+                title: "保留的书".into(),
+                sha256: good_sha.clone(),
+                cover_hash: Some(cover_hash.clone()),
+            }],
+        };
+
+        let removed = gc_store(&bs, &cs, &index).unwrap();
+        assert_eq!(removed, 2, "应移除 2 个孤儿（1 blob + 1 封面）");
+
+        // 被引用的完好无损
+        assert!(bs.path_for(&good_sha).unwrap().is_some(), "被引用的 blob 应保留");
+        assert!(cs.path_for(&cover_hash).unwrap().is_some(), "被引用的封面应保留");
+        // 孤儿已删
+        assert!(!orphan_blob_dir.join(&orphan_sha).exists(), "孤儿 blob 应被删除");
+        assert!(
+            !orphan_cover_dir.join(format!("{orphan_cover_hash}.jpg")).exists(),
+            "孤儿封面应被删除"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }
