@@ -936,3 +936,28 @@ class AnnotationActions {
 }
 
 final annotationActionsProvider = Provider<AnnotationActions>((ref) => AnnotationActions(ref));
+
+// ─────────────────────────── 冲突采纳（PM#2） ───────────────────────────
+
+/// 冲突「采用此值」：采纳本地或远端那一侧，写回本地实体并推送其它端。
+class ConflictActions {
+  ConflictActions(this._ref);
+
+  final Ref _ref;
+
+  Future<void> adopt(int conflictId, String side) async {
+    final db = _ref.read(databaseProvider);
+    final clock = await _ref.read(hlcClockProvider.future);
+    final deviceId = await _ref.read(deviceIdProvider.future);
+    final hlc = clock.tick();
+    await db.adoptConflict(
+      id: conflictId,
+      side: side,
+      hlc: hlc.encode(),
+      deviceId: deviceId,
+    );
+    _ref.read(syncTriggerProvider.notifier).markDirty();
+  }
+}
+
+final conflictActionsProvider = Provider<ConflictActions>((ref) => ConflictActions(ref));

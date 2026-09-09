@@ -546,6 +546,215 @@ class AppDatabase extends _$AppDatabase {
       (update(conflictLog)..where((t) => t.id.equals(id)))
           .write(const ConflictLogCompanion(dismissed: Value(true)));
 
+  /// 读取单条冲突（采纳前需要拿到被覆盖的那一侧值）。
+  Future<ConflictRow?> getConflict(int id) =>
+      (select(conflictLog)..where((t) => t.id.equals(id))).getSingleOrNull();
+
+  /// 采纳冲突中的某一方（"采用此值"）：把被覆盖的那一侧写回本地实体，
+  /// 写入 outbox 推送给其它端，并标记该留痕已处理。
+  ///
+  /// [side] 为 `local` 或 `remote`。绝不静默覆盖 —— 这里反而是"主动覆盖"，
+  /// 所以必须显式 dismiss（用户仍可在日志里反悔排查）。
+  Future<void> adoptConflict({
+    required int id,
+    required String side,
+    required String hlc,
+    required String deviceId,
+  }) async {
+    final row = await getConflict(id);
+    if (row == null || row.dismissed) return;
+    final adopted = jsonDecode(side == 'local' ? row.localValue : row.remoteValue);
+    final now = DateTime.now().toUtc();
+    await _writeAdoptedField(
+      row.entityType,
+      row.entityId,
+      row.field,
+      adopted,
+      hlc,
+      deviceId,
+      now,
+    );
+    await dismissConflict(id);
+    // 推送给其它端：稀疏 payload（仅改动的字段 + hlc/updatedBy），
+    // 让对端走和本地正常改动一致的三方合并流水线。
+    await into(outbox).insert(
+      OutboxCompanion.insert(
+        entityType: row.entityType,
+        entityId: row.entityId,
+        op: 'upsert',
+        payloadJson: jsonEncode({
+          'id': row.entityId,
+          row.field: adopted,
+          'hlc': hlc,
+          'updatedBy': deviceId,
+        }),
+        hlc: hlc,
+      ),
+    );
+  }
+
+  // ── 冲突值类型校正（以 jsonEncode 形式存储，读回需按列类型还原） ──
+  static String? _asStr(dynamic v) => v == null ? null : v.toString();
+  static int? _asInt(dynamic v) =>
+      v is int ? v : (v == null ? null : int.tryParse(v.toString()));
+  static double? _asDouble(dynamic v) =>
+      v is num ? v.toDouble() : (v == null ? null : double.tryParse(v.toString()));
+  static bool _asBool(dynamic v) => v is bool ? v : (v?.toString() == 'true');
+  static DateTime? _asDateTime(dynamic v) => v is String ? DateTime.tryParse(v) : null;
+
+  /// 按实体类型 + 字段，把 adopted 值写回正确的列（仅写该列 + 同步元字段）。
+  Future<void> _writeAdoptedField(
+    String entityType,
+    String entityId,
+    String field,
+    dynamic adopted,
+    String hlc,
+    String deviceId,
+    DateTime now,
+  ) async {
+    final h = Value(hlc);
+    final u = Value(deviceId);
+    final at = Value(now);
+    switch (entityType) {
+      case 'book':
+        final w = update(books)..where((t) => t.id.equals(entityId));
+        switch (field) {
+          case 'title':
+            await w.write(BooksCompanion(title: Value(_asStr(adopted) ?? ''), hlc: h, updatedBy: u, updatedAt: at));
+          case 'subtitle':
+            await w.write(BooksCompanion(subtitle: Value(_asStr(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'author':
+            await w.write(BooksCompanion(author: Value(_asStr(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'publisher':
+            await w.write(BooksCompanion(publisher: Value(_asStr(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'language':
+            await w.write(BooksCompanion(language: Value(_asStr(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'series':
+            await w.write(BooksCompanion(series: Value(_asStr(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'seriesIndex':
+            await w.write(BooksCompanion(seriesIndex: Value(_asDouble(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+          case 'description':
+            await w.write(BooksCompanion(description: Value(_asStr(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'tagsJson':
+            await w.write(BooksCompanion(tagsJson: Value(_asStr(adopted) ?? '[]'), hlc: h, updatedBy: u, updatedAt: at));
+          case 'localPath':
+            await w.write(BooksCompanion(localPath: Value(_asStr(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'coverPath':
+            await w.write(BooksCompanion(coverPath: Value(_asStr(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'coverHash':
+            await w.write(BooksCompanion(coverHash: Value(_asStr(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'coverSource':
+            await w.write(BooksCompanion(coverSource: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+          case 'fileSize':
+            await w.write(BooksCompanion(fileSize: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+          case 'totalChars':
+            await w.write(BooksCompanion(totalChars: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+          case 'customOrder':
+            await w.write(BooksCompanion(customOrder: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+          case 'addedAt':
+            await w.write(BooksCompanion(addedAt: Value(_asDateTime(adopted) ?? now), hlc: h, updatedBy: u, updatedAt: at));
+          case 'updatedAt':
+            await w.write(BooksCompanion(updatedAt: Value(_asDateTime(adopted) ?? now), hlc: h, updatedBy: u, updatedAt: at));
+          case 'deleted':
+            await w.write(BooksCompanion(deleted: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+        }
+      case 'progress':
+        final w = update(progresses)..where((t) => t.bookId.equals(entityId));
+        switch (field) {
+          case 'percent':
+            await w.write(ProgressesCompanion(percent: Value(_asDouble(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+          case 'charOffset':
+            await w.write(ProgressesCompanion(charOffset: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+          case 'locatorJson':
+            await w.write(ProgressesCompanion(locatorJson: Value(_asStr(adopted) ?? ''), hlc: h, updatedBy: u, updatedAt: at));
+          case 'anchorBefore':
+            await w.write(ProgressesCompanion(anchorBefore: Value(_asStr(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'anchorAfter':
+            await w.write(ProgressesCompanion(anchorAfter: Value(_asStr(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'forced':
+            await w.write(ProgressesCompanion(forced: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'updatedAt':
+            await w.write(ProgressesCompanion(updatedAt: Value(_asDateTime(adopted) ?? now), hlc: h, updatedBy: u, updatedAt: at));
+        }
+      case 'rule':
+        final w = update(rules)..where((t) => t.id.equals(entityId));
+        switch (field) {
+          case 'name':
+            await w.write(RulesCompanion(name: Value(_asStr(adopted) ?? ''), hlc: h, updatedBy: u, updatedAt: at));
+          case 'kind':
+            await w.write(RulesCompanion(kind: Value(_asStr(adopted) ?? 'regex'), hlc: h, updatedBy: u, updatedAt: at));
+          case 'pattern':
+            await w.write(RulesCompanion(pattern: Value(_asStr(adopted) ?? ''), hlc: h, updatedBy: u, updatedAt: at));
+          case 'caseSensitive':
+            await w.write(RulesCompanion(caseSensitive: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'colorValue':
+            await w.write(RulesCompanion(colorValue: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+          case 'bgColorValue':
+            await w.write(RulesCompanion(bgColorValue: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+          case 'bgOpacity':
+            await w.write(RulesCompanion(bgOpacity: Value(_asDouble(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+          case 'bold':
+            await w.write(RulesCompanion(bold: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'italic':
+            await w.write(RulesCompanion(italic: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'underline':
+            await w.write(RulesCompanion(underline: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'priority':
+            await w.write(RulesCompanion(priority: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+          case 'scopeCsv':
+            await w.write(RulesCompanion(scopeCsv: Value(_asStr(adopted) ?? 'novel'), hlc: h, updatedBy: u, updatedAt: at));
+          case 'enabled':
+            await w.write(RulesCompanion(enabled: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'sortOrder':
+            await w.write(RulesCompanion(sortOrder: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+          case 'updatedAt':
+            await w.write(RulesCompanion(updatedAt: Value(_asDateTime(adopted) ?? now), hlc: h, updatedBy: u, updatedAt: at));
+          case 'deleted':
+            await w.write(RulesCompanion(deleted: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+        }
+      case 'collection':
+        final w = update(collections)..where((t) => t.id.equals(entityId));
+        switch (field) {
+          case 'name':
+            await w.write(CollectionsCompanion(name: Value(_asStr(adopted) ?? ''), hlc: h, updatedBy: u, updatedAt: at));
+          case 'sortOrder':
+            await w.write(CollectionsCompanion(sortOrder: Value(_asInt(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'colorValue':
+            await w.write(CollectionsCompanion(colorValue: Value(_asInt(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'emoji':
+            await w.write(CollectionsCompanion(emoji: Value(_asStr(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'deleted':
+            await w.write(CollectionsCompanion(deleted: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+        }
+      case 'membership':
+        final w = update(memberships)..where((t) => t.id.equals(entityId));
+        switch (field) {
+          case 'sortOrder':
+            await w.write(MembershipsCompanion(sortOrder: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+          case 'removed':
+            await w.write(MembershipsCompanion(removed: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+        }
+      case 'annotation':
+        final w = update(annotations)..where((t) => t.id.equals(entityId));
+        switch (field) {
+          case 'note':
+            await w.write(AnnotationsCompanion(note: Value(_asStr(adopted) ?? ''), hlc: h, updatedBy: u, updatedAt: at));
+          case 'quote':
+            await w.write(AnnotationsCompanion(quote: Value(_asStr(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+          case 'chapter':
+            await w.write(AnnotationsCompanion(chapter: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+          case 'charOffset':
+            await w.write(AnnotationsCompanion(charOffset: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+          case 'createdAt':
+            await w.write(AnnotationsCompanion(createdAt: Value(_asDateTime(adopted) ?? now), hlc: h, updatedBy: u, updatedAt: at));
+          case 'updatedAt':
+            await w.write(AnnotationsCompanion(updatedAt: Value(_asDateTime(adopted) ?? now), hlc: h, updatedBy: u, updatedAt: at));
+          case 'deleted':
+            await w.write(AnnotationsCompanion(deleted: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+        }
+    }
+  }
+
   /// 回收「已处理且超过保留期」的冲突留痕，返回删除条数。
   ///
   /// [dismissConflict] 是软删，只翻 `dismissed` 标志；不清的话 conflict_log 会

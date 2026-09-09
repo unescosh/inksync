@@ -56,8 +56,21 @@ class SyncCenterScreen extends ConsumerWidget {
                   ),
                 );
               }
+              // 按实体分组，同一本书/批注的多个字段冲突收在一起
+              final groups = <String, List<ConflictRow>>{};
+              for (final c in list) {
+                groups.putIfAbsent('${c.entityType}::${c.entityId}', () => [])
+                  ..add(c);
+              }
               return Column(
-                children: [for (final c in list) _ConflictTile(row: c)],
+                children: [
+                  for (final entry in groups.entries)
+                    _ConflictGroup(
+                      entityType: entry.key.split('::').first,
+                      entityId: entry.key.split('::').last,
+                      rows: entry.value,
+                    ),
+                ],
               );
             },
           ),
@@ -253,6 +266,55 @@ class _Row extends StatelessWidget {
       );
 }
 
+class _ConflictGroup extends StatelessWidget {
+  const _ConflictGroup({
+    required this.entityType,
+    required this.entityId,
+    required this.rows,
+  });
+
+  final String entityType;
+  final String entityId;
+  final List<ConflictRow> rows;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = _entityLabel(entityType);
+    final shortId = entityId.length > 8 ? entityId.substring(0, 8) : entityId;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            children: [
+              Icon(Icons.folder_outlined,
+                  size: 16, color: Theme.of(context).colorScheme.onSurfaceVariant),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text('$label · $shortId',
+                    style: Theme.of(context).textTheme.labelMedium),
+              ),
+            ],
+          ),
+        ),
+        for (final r in rows) _ConflictTile(row: r),
+      ],
+    );
+  }
+
+  static String _entityLabel(String t) =>
+      const {
+        'book': '书籍',
+        'annotation': '批注',
+        'collection': '分组',
+        'rule': '高亮规则',
+        'progress': '阅读进度',
+        'membership': '分组关系',
+      }[t] ??
+      t;
+}
+
 class _ConflictTile extends ConsumerWidget {
   const _ConflictTile({required this.row});
 
@@ -262,6 +324,9 @@ class _ConflictTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
     final winnerText = row.winner == 'local' ? '保留本地' : '采用远端';
+    final reason = row.winner == 'local'
+        ? '裁决：已保留本地（本端 HLC 较新或仅本端改动）'
+        : '裁决：已采用远端（远端 HLC 较新）';
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: Padding(
@@ -273,7 +338,7 @@ class _ConflictTile extends ConsumerWidget {
               children: [
                 Expanded(
                   child: Text(
-                    '${row.entityType} · ${row.field}',
+                    row.field,
                     style: Theme.of(context).textTheme.titleSmall,
                   ),
                 ),
@@ -284,10 +349,42 @@ class _ConflictTile extends ConsumerWidget {
                 ),
               ],
             ),
+            const SizedBox(height: 4),
+            Text(
+              reason,
+              style: Theme.of(context)
+                  .textTheme
+                  .bodySmall
+                  ?.copyWith(color: scheme.onSurfaceVariant),
+            ),
             const SizedBox(height: 8),
-            _ValueLine(label: '本地', value: _decode(row.localValue), color: scheme.primary),
-            _ValueLine(label: '远端', value: _decode(row.remoteValue), color: scheme.tertiary),
-            const SizedBox(height: 8),
+            _ValueLine(
+              label: '本地',
+              value: _decode(row.localValue),
+              color: scheme.primary,
+              onAdopt: () async {
+                await ref.read(conflictActionsProvider).adopt(row.id, 'local');
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('已采用本地值，将同步到其它端')),
+                  );
+                }
+              },
+            ),
+            _ValueLine(
+              label: '远端',
+              value: _decode(row.remoteValue),
+              color: scheme.tertiary,
+              onAdopt: () async {
+                await ref.read(conflictActionsProvider).adopt(row.id, 'remote');
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('已采用远端值，将同步到其它端')),
+                  );
+                }
+              },
+            ),
+            const SizedBox(height: 4),
             Align(
               alignment: Alignment.centerRight,
               child: TextButton(
@@ -317,11 +414,13 @@ class _ValueLine extends StatelessWidget {
     required this.label,
     required this.value,
     required this.color,
+    this.onAdopt,
   });
 
   final String label;
   final String value;
   final Color color;
+  final VoidCallback? onAdopt;
 
   @override
   Widget build(BuildContext context) => Padding(
@@ -342,6 +441,8 @@ class _ValueLine extends StatelessWidget {
                 style: Theme.of(context).textTheme.bodySmall,
               ),
             ),
+            if (onAdopt != null)
+              TextButton(onPressed: onAdopt, child: const Text('采用此值')),
           ],
         ),
       );
