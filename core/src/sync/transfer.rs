@@ -898,6 +898,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// 回归方向 2：`FsCoverStore` 落盘路径必须与 App 的 `DefaultCoverStore` 对齐，
+    /// 即 `<root>/cache/covers/<hash>.<ext>`（而非旧的 `<root>/covers/...`）。
+    /// 把 CLI 的 `--store` 指向 App 文档目录后，pull 拉回的封面才能被 App 的
+    /// `pathFor(coverHash)` 直接命中。若有人把路径改回 `<root>/covers`，此测试立即挂。
+    #[test]
+    fn fs_cover_store_lands_in_cache_covers() {
+        let root = std::env::temp_dir().join(format!("inksync_covalign_{}", nanos()));
+        std::fs::create_dir_all(&root).unwrap();
+        let cs = FsCoverStore::new(root.clone());
+
+        // 造一张"封面"源文件（字节内容无所谓，ext 由调用方按魔数决定，这里直接传 .jpg）
+        let src = root.join("src_cover.bin");
+        std::fs::write(&src, jpeg_cover()).unwrap();
+
+        let hash = "deadbeef00c0ffee00face";
+        let dest = cs.import_file(&src, hash, ".jpg").unwrap();
+
+        // 关键断言：落盘路径必须含 cache/covers
+        let want = root.join("cache").join("covers").join(format!("{hash}.jpg"));
+        assert_eq!(dest, want, "封面必须落在 <root>/cache/covers/<hash>.<ext>");
+        assert!(dest.exists(), "封面文件应真实写出");
+
+        // path_for 能在同一路径命中
+        let found = cs.path_for(hash).unwrap();
+        assert_eq!(found, Some(want), "path_for 应在 cache/covers 找到封面");
+
+        // 回归守护：旧的 <root>/covers/<hash>.jpg 绝不应存在
+        let old = root.join("covers").join(format!("{hash}.jpg"));
+        assert!(!old.exists(), "回归：不应再落到 <root>/covers（与 App 不对齐）");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// `sync_local_books` 串起扫描→配对→推，并产出可读的本地索引清单。
     #[test]
     fn sync_local_books_writes_index() {
