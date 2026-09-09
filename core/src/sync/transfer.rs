@@ -381,6 +381,95 @@ impl CoverStore for FsCoverStore {
     }
 }
 
+// ─────────────────────────── 本地仓库完整性校验（verify） ───────────────────────────
+//
+// 无头备份不是"传完就完"——磁盘静默损坏、半截文件、中断残留都会让备份在
+// 需要恢复的关键时刻才发现读不了。内容寻址天然提供自检手段：blob 文件名本身
+// 就是 sha256，封面文件名（去扩展名）也是 coverHash。逐个重算 sha256 比对，
+// 不符即损坏。供 CLI `verify` 子命令与未来的"备份健康检查"调用。
+
+/// 本地仓库完整性校验结果。
+#[derive(Debug, Default, Clone)]
+pub struct StoreVerify {
+    pub blobs_total: usize,
+    pub blobs_ok: usize,
+    pub covers_total: usize,
+    pub covers_ok: usize,
+    /// (预期哈希, 实际哈希, 绝对路径) —— 文件名（内容寻址键）与内容不符 = 损坏
+    pub corrupted: Vec<(String, String, PathBuf)>,
+}
+
+impl StoreVerify {
+    pub fn ok(&self) -> bool {
+        self.corrupted.is_empty()
+    }
+}
+
+/// 校验本地仓库：每个 blob 文件的内容 sha256 必须等于其文件名，每个封面文件的
+/// 内容 sha256 必须等于其文件名（去扩展名）。返回统计与损坏清单（损坏信息不写库，
+/// 让调用方决定是删是修）。
+pub fn verify_store(blob_store: &FsBlobStore, cover_store: &FsCoverStore) -> Result<StoreVerify> {
+    let mut v = StoreVerify::default();
+
+    let blobs_root = blob_store.root.join("blobs");
+    for e in walk_files(&blobs_root)? {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.contains(".tmp-") {
+            continue; // 跳过 import_file 的临时文件
+        }
+        v.blobs_total += 1;
+        let actual = crate::sha256_file(&e.path())?;
+        if actual == name {
+            v.blobs_ok += 1;
+        } else {
+            v.corrupted.push((name, actual, e.path()));
+        }
+    }
+
+    let covers_root = cover_store.cover_dir();
+    for e in walk_files(&covers_root)? {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.contains(".tmp-") {
+            continue;
+        }
+        // 封面文件名是 <hash>.<ext>，去扩展名得到内容寻址键
+        let expected = match name.rfind('.') {
+            Some(i) => name[..i].to_string(),
+            None => name.clone(),
+        };
+        v.covers_total += 1;
+        let actual = crate::sha256_file(&e.path())?;
+        if actual == expected {
+            v.covers_ok += 1;
+        } else {
+            v.corrupted.push((expected, actual, e.path()));
+        }
+    }
+
+    Ok(v)
+}
+
+/// 递归收集目录下所有普通文件（目录不存在时返回空，不报错）。
+fn walk_files(dir: &Path) -> Result<Vec<std::fs::DirEntry>> {
+    let mut out = Vec::new();
+    if !dir.exists() {
+        return Ok(out);
+    }
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(cur) = stack.pop() {
+        for entry in std::fs::read_dir(&cur)? {
+            let entry = entry?;
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                out.push(entry);
+            }
+        }
+    }
+    Ok(out)
+}
+
 // ─────────────────────────── 无头 CLI 辅助（扫描本地目录 → 传输条目） ───────────────────────────
 //
 // 给 UOS / CLI 路径一个最小可用的入口：扫描本地书目录与封面目录，按内容寻址构建
@@ -929,6 +1018,49 @@ mod tests {
         assert!(!old.exists(), "回归：不应再落到 <root>/covers（与 App 不对齐）");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 校验应抓出"文件名 sha256 与内容不符"的损坏 blob / 封面，且放过完好文件。
+    #[test]
+    fn verify_store_detects_corruption() {
+        let base = std::env::temp_dir().join(format!("inksync_verify_{}", nanos()));
+        std::fs::create_dir_all(&base).unwrap();
+        let bs = FsBlobStore::new(base.join("store"));
+        let cs = FsCoverStore::new(base.join("store"));
+
+        // 完好的 blob
+        let good = base.join("good.bin");
+        std::fs::write(&good, b"hello inksync").unwrap();
+        let good_sha = crate::sha256_file(&good).unwrap();
+        let _ = bs.import_file(&good, &good_sha).unwrap();
+
+        // 损坏的 blob：文件名是"正确 sha"、内容却不同
+        let bad_sha = "de".repeat(32);
+        let bad_dir = base.join("store").join("blobs").join(&bad_sha[..2]);
+        std::fs::create_dir_all(&bad_dir).unwrap();
+        std::fs::write(bad_dir.join(&bad_sha), b"TAMPERED").unwrap();
+
+        // 完好的封面
+        let cover_src = base.join("cover.bin");
+        std::fs::write(&cover_src, jpeg_cover()).unwrap();
+        let cover_hash = sha256_bytes(&jpeg_cover());
+        let _ = cs.import_file(&cover_src, &cover_hash, ".jpg").unwrap();
+
+        // 损坏的封面
+        let bad_cover_hash = "c0".repeat(32);
+        let cover_bad_dir = base.join("store").join("cache").join("covers");
+        std::fs::create_dir_all(&cover_bad_dir).unwrap();
+        std::fs::write(cover_bad_dir.join(format!("{bad_cover_hash}.jpg")), b"TAMPERED-COVER").unwrap();
+
+        let v = verify_store(&bs, &cs).unwrap();
+        assert_eq!(v.blobs_total, 2, "应扫到 2 个 blob");
+        assert_eq!(v.blobs_ok, 1, "1 完好 1 损坏");
+        assert_eq!(v.covers_total, 2, "应扫到 2 个封面");
+        assert_eq!(v.covers_ok, 1, "1 完好 1 损坏");
+        assert!(!v.ok(), "存在损坏，ok() 应为 false");
+        assert_eq!(v.corrupted.len(), 2, "损坏清单应有 2 条");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// `sync_local_books` 串起扫描→配对→推，并产出可读的本地索引清单。

@@ -66,6 +66,24 @@ INKSYNC_STORE=/srv/inksync/store
   - `store/book_index.json`：人类可读清单（sha256/coverHash 映射回书名），便于核对"备份了哪些书"。
 - 远端：与 App 共用的 `inksync/blobs/...`、`inksync/covers/...`。
 
+### 本地仓库校验（verify，不需要网络）
+
+备份不是"传完就完"——磁盘静默损坏、半截文件会在需要恢复时才发现读不了。`verify`
+逐个重算 `store/blobs` 与 `store/cache/covers` 里每个文件的 sha256，与内容寻址文件名比对，
+抓出"文件名 hash 与内容不符"的损坏项；全部通过退出码 0，有损坏退出码 1（便于定时任务判定）：
+
+```bash
+./cli_backup verify --store /srv/inksync/store
+# 输出示例：
+# 本地仓库完整性校验：blob 12 个（完好 12）/ 封面 8 个（完好 7）
+# ❌ 发现 1 处损坏（文件名 sha256 与内容不符）：
+#   /srv/inksync/store/cache/covers/<hash>.jpg  预期=<hash> 实际=<实际sha>
+```
+
+实现见 `core/src/sync/transfer.rs` 的 `verify_store`（默认 features、可在沙箱/CI 单测，
+`verify_store_detects_corruption` 用例覆盖"完好放过 / 损坏抓出"）。建议把 `verify` 接在
+定时备份之后跑，损坏即告警。
+
 ### 与 App 本地仓库对齐（关键）
 CLI 的落盘布局**刻意与 App 对齐**，这样把 `--store` 指向 App 的文档目录后，CLI 拉回的内容
 App 能直接读到，无需改数据库：

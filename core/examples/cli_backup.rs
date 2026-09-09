@@ -26,6 +26,10 @@
 //!
 //! # 试跑：只打印将要上传/下载的内容，不触碰远端
 //! cargo run --features sync --example cli_backup -- push --config ./inksync.env --dry-run
+//!
+//! # 校验本地仓库完整性（不需要网络；逐个重算 sha256 比对内容寻址文件名，
+//! # 抓出磁盘静默损坏 / 半截文件；有损坏时以非 0 退出码结束，便于定时任务判定）
+//! cargo run --features sync --example cli_backup -- verify --store /path/to/local_store
 //! ```
 //!
 //! 远端布局（与 Dart 引擎一致，内容寻址）：
@@ -40,7 +44,7 @@ use inksync_core::cli::load_env_file;
 use inksync_core::model::{SyncReport, WebDavConfig};
 use inksync_core::sync::transfer::{
     BookIndex, FsBlobStore, FsCoverStore, list_remote, pair_covers, pull_remote, scan_book_dir,
-    sync_local_books,
+    sync_local_books, verify_store,
 };
 use inksync_core::sync::webdav::WebDavClient;
 
@@ -75,7 +79,7 @@ fn parse_args() -> Args {
     let mut it = std::env::args().skip(1);
     while let Some(tok) = it.next() {
         match tok.as_str() {
-            "push" | "pull" => a.mode = tok,
+            "push" | "pull" | "verify" => a.mode = tok,
             "--books" => a.books = it.next().map(PathBuf::from),
             "--covers" => a.covers = it.next().map(PathBuf::from),
             "--store" => a.store = it.next().map(PathBuf::from).unwrap_or(a.store),
@@ -154,6 +158,12 @@ fn cfg(args: &Args) -> WebDavConfig {
 fn run() -> Result<(), String> {
     let mut args = parse_args();
     apply_config(&mut args)?;
+
+    // verify 是纯本地自检，不需要网络，也不依赖 push/pull 的 --url 校验
+    if args.mode == "verify" {
+        return verify_store_cmd(&args);
+    }
+
     validate(&args);
 
     if args.dry_run {
@@ -263,6 +273,27 @@ fn dry_run(args: &Args) -> Result<(), String> {
         println!("[dry-run] 未做下载。去掉 --dry-run 正式拉取。");
     }
     Ok(())
+}
+
+/// 校验本地仓库完整性：逐个重算 blob / 封面的 sha256，与内容寻址文件名比对。
+/// 不需要网络；发现损坏（文件名 hash 与内容不符）时以非 0 退出码结束，便于脚本判定。
+fn verify_store_cmd(args: &Args) -> Result<(), String> {
+    let store = FsBlobStore::new(args.store.clone());
+    let cover_store = FsCoverStore::new(args.store.clone());
+    let v = verify_store(&store, &cover_store).map_err(|e| format!("校验失败：{e}"))?;
+    println!(
+        "本地仓库完整性校验：blob {} 个（完好 {}）/ 封面 {} 个（完好 {}）",
+        v.blobs_total, v.blobs_ok, v.covers_total, v.covers_ok
+    );
+    if v.corrupted.is_empty() {
+        println!("✅ 全部通过：内容寻址键与文件内容一致，无损坏。");
+        return Ok(());
+    }
+    eprintln!("❌ 发现 {} 处损坏（文件名 sha256 与内容不符）：", v.corrupted.len());
+    for (expected, actual, path) in &v.corrupted {
+        eprintln!("  {}  预期={expected} 实际={actual}", path.display());
+    }
+    exit(1);
 }
 
 fn main() {
