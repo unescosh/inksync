@@ -41,6 +41,9 @@ dependencies:
   # 跨端适配
   device_info_plus: ^10.1.0
   package_info_plus: ^8.0.0
+  # 同步轮询门槛（PM#5）：仅 Wi-Fi / 仅充电
+  connectivity_plus: ^6.1.0
+  battery_plus: ^5.0.0
 
 dev_dependencies:
   flutter_test:

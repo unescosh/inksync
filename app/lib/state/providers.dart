@@ -8,6 +8,8 @@ import 'dart:math' as math;
 import 'package:crypto/crypto.dart' show sha256;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:battery_plus/battery_plus.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -17,6 +19,7 @@ import '../data/database.dart';
 import '../reader/rules.dart';
 import '../sync/sync_engine.dart';
 import '../sync/webdav_client.dart';
+import 'sync_prefs.dart';
 
 /// 依赖注入与全局状态。
 
@@ -122,9 +125,9 @@ final syncProgressProvider = StateProvider<SyncProgressState>(
 ///
 /// "实时"策略（WebDAV 没有推送，只能这样逼近）：
 ///  · [markDirty]  本地任何变更立刻调用，**debounce 3 秒**后触发一次同步；
-///  · [syncNow]    立即同步（下拉刷新 / 手动点按钮）；
-///  · 周期轮询     阅读中 60s、空闲 5min，由 UI 层定时器调用 [syncNow]，
-///                 命中 304 时只有 1 个约 200 字节的请求，成本极低。
+///  · [syncNow]    立即同步（下拉刷新 / 手动点按钮 / 自动轮询控制器调用）；
+///  · 周期轮询     由 [PollingController] 接管（PM#5），读 [SyncPrefs] 决定
+///                 频率/门限/退避，命中 304 时只有 1 个约 200 字节的请求，成本极低。
 class SyncController extends Notifier<AsyncValue<SyncReport?>> {
   DateTime? _lastRun;
   bool _running = false;
@@ -178,6 +181,118 @@ class SyncController extends Notifier<AsyncValue<SyncReport?>> {
 
 final syncTriggerProvider =
     NotifierProvider<SyncController, AsyncValue<SyncReport?>>(SyncController.new);
+
+// ─────────────────────────── 自动同步轮询（PM#5） ───────────────────────────
+
+/// 自动同步轮询偏好（本地，不同步）。设置页写入、轮询控制器读取。
+final syncPrefsProvider = FutureProvider<SyncPrefs>((ref) async {
+  final db = ref.watch(databaseProvider);
+  return SyncPrefs.load(db);
+});
+
+/// 轮询状态快照，供 UI 展示「自动同步已暂停」之类提示。
+class PollingInfo {
+  const PollingInfo({required this.active, this.consecutiveFails = 0});
+
+  final bool active;
+  final int consecutiveFails;
+}
+
+/// 自动同步轮询控制器。取代 main.dart 里写死的 5 分钟 Timer.periodic：
+///  · [SyncPrefs.autoSync] 关 → 完全不轮询；
+///  · [SyncPrefs.wifiOnly] 开 → 仅 Wi-Fi/有线 下才同步，移动网络跳过；
+///  · [SyncPrefs.chargingOnly] 开 → 仅充电/满电时同步；
+///  · 同步失败做指数退避（30s→60s→…，封顶 2h），连续失败达上限（[kMaxConsecutiveFails]）
+///    后停止自动轮询（但手动 [SyncController.syncNow] 仍可用，且任意一次成功即复位
+///    计数、恢复轮询）；
+///  · 偏好变更时随 [syncPrefsProvider] 重建并重新排程。
+class PollingController extends Notifier<PollingInfo> {
+  Timer? _timer;
+  int _consecutiveFails = 0;
+
+  @override
+  PollingInfo build() {
+    final prefs = ref.watch(syncPrefsProvider).valueOrNull ?? const SyncPrefs();
+
+    // 任何一次同步成功（含用户在别处手动触发）都复位失败计数、恢复轮询。
+    // 仅当状态落定为 AsyncData（排除 loading/error）才判定为成功，避免把
+    // "开始同步的 loading 过渡"误判成成功而提前清零退避计数。
+    ref.listen<AsyncValue<SyncReport?>>(syncTriggerProvider, (_, next) {
+      if (next is AsyncData<SyncReport?>) {
+        final ok = next.value?.ok ?? true;
+        if (ok && _consecutiveFails > 0) {
+          _consecutiveFails = 0;
+          _reschedule(ref.read(syncPrefsProvider).valueOrNull ?? const SyncPrefs());
+        }
+      }
+    });
+
+    ref.onDispose(() => _timer?.cancel());
+    _reschedule(prefs);
+    return PollingInfo(
+      active: prefs.autoSync && _consecutiveFails < kMaxConsecutiveFails,
+      consecutiveFails: _consecutiveFails,
+    );
+  }
+
+  void _reschedule(SyncPrefs prefs) {
+    _timer?.cancel();
+    if (!prefs.autoSync || _consecutiveFails >= kMaxConsecutiveFails) return;
+    _timer = Timer(
+      computePollDelay(consecutiveFails: _consecutiveFails, intervalMin: prefs.intervalMin),
+      () => _tick(prefs),
+    );
+  }
+
+  Future<void> _tick(SyncPrefs prefs) async {
+    if (!prefs.autoSync || _consecutiveFails >= kMaxConsecutiveFails) {
+      _reschedule(prefs);
+      return;
+    }
+    if (prefs.wifiOnly) {
+      List<ConnectivityResult> results;
+      try {
+        results = await Connectivity().checkConnectivity();
+      } catch (_) {
+        results = const [ConnectivityResult.other]; // 查不到就放行，避免卡死
+      }
+      if (shouldSkipForNetwork(results, true)) {
+        _reschedule(prefs);
+        return;
+      }
+    }
+    if (prefs.chargingOnly) {
+      BatteryState st;
+      try {
+        st = await Battery().state.first;
+      } catch (_) {
+        st = BatteryState.full; // 查不到就放行
+      }
+      if (st != BatteryState.charging && st != BatteryState.full) {
+        _reschedule(prefs);
+        return;
+      }
+    }
+    final ok = await _runOnce();
+    _consecutiveFails = ok ? 0 : _consecutiveFails + 1;
+    _reschedule(prefs);
+  }
+
+  /// 复用 [SyncController.syncNow]；它自带 _running 互斥，不会并发。
+  /// 用同步结束后的 [syncTriggerProvider] 状态判断成败（syncNow 内部已吞异常）。
+  Future<bool> _runOnce() async {
+    try {
+      await ref.read(syncTriggerProvider.notifier).syncNow();
+      final st = ref.read(syncTriggerProvider);
+      return !st.hasError && (st.valueOrNull?.ok ?? true);
+    } catch (_) {
+      return false;
+    }
+  }
+}
+
+final pollingControllerProvider =
+    NotifierProvider<PollingController, PollingInfo>(PollingController.new);
 
 // ─────────────────────────── 排序 / 分组（本地偏好） ───────────────────────────
 

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../state/providers.dart';
+import '../state/sync_prefs.dart';
 import '../sync/sync_engine.dart';
 import '../sync/webdav_client.dart';
 
@@ -31,6 +32,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   bool _testOk = false;
 
   bool _saving = false;
+
+  SyncPrefs _prefs = const SyncPrefs();
+  bool _prefsSeeded = false;
 
   @override
   void initState() {
@@ -93,6 +97,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
   }
 
+  /// 写入自动同步偏好并让轮询控制器重新排程。
+  Future<void> _applyPrefs(SyncPrefs next) async {
+    if (!mounted) return;
+    setState(() => _prefs = next);
+    await next.save(ref.read(databaseProvider));
+    ref.invalidate(syncPrefsProvider);
+  }
+
   Future<void> _save() async {
     final url = _baseUrlCtl.text.trim();
     if (url.isEmpty) {
@@ -125,6 +137,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Widget build(BuildContext context) {
     final progress = ref.watch(syncProgressProvider);
     final last = ref.watch(syncTriggerProvider);
+    final livePrefs = ref.watch(syncPrefsProvider).valueOrNull;
+    if (livePrefs != null && !_prefsSeeded) {
+      _prefs = livePrefs;
+      _prefsSeeded = true;
+    }
 
     return Scaffold(
       appBar: AppBar(title: const Text('同步设置')),
@@ -234,6 +251,66 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   if (drift != null)
                     Text(drift, style: const TextStyle(color: Colors.orange)),
                 ],
+              );
+            },
+          ),
+          const SizedBox(height: 10),
+          const Divider(height: 28),
+          Text('自动同步', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('自动同步'),
+            subtitle: const Text('后台定期拉取改动（命中 304 几乎零流量）'),
+            value: _prefs.autoSync,
+            onChanged: (v) => _applyPrefs(_prefs.copyWith(autoSync: v)),
+          ),
+          if (_prefs.autoSync) ...[
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('同步频率'),
+              trailing: DropdownButton<int>(
+                value: _prefs.intervalMin,
+                items: const [
+                  DropdownMenuItem(value: 1, child: Text('每 1 分钟')),
+                  DropdownMenuItem(value: 5, child: Text('每 5 分钟')),
+                  DropdownMenuItem(value: 15, child: Text('每 15 分钟')),
+                  DropdownMenuItem(value: 30, child: Text('每 30 分钟')),
+                  DropdownMenuItem(value: 60, child: Text('每 60 分钟')),
+                ],
+                onChanged: (v) {
+                  if (v != null) _applyPrefs(_prefs.copyWith(intervalMin: v));
+                },
+              ),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('仅 Wi-Fi / 有线时同步'),
+              subtitle: const Text('移动网络下不同步，避免消耗流量'),
+              value: _prefs.wifiOnly,
+              onChanged: (v) => _applyPrefs(_prefs.copyWith(wifiOnly: v)),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('仅充电时同步'),
+              subtitle: const Text('插电时才做后台同步，省电'),
+              value: _prefs.chargingOnly,
+              onChanged: (v) => _applyPrefs(_prefs.copyWith(chargingOnly: v)),
+            ),
+          ],
+          Builder(
+            builder: (context) {
+              final polling = ref.watch(pollingControllerProvider);
+              if (polling.consecutiveFails < kMaxConsecutiveFails) {
+                return const SizedBox.shrink();
+              }
+              return Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  '自动同步已暂停：连续 $kMaxConsecutiveFails 次失败。'
+                  '点上方「立即同步」成功后即自动恢复。',
+                  style: const TextStyle(color: Colors.orange, fontSize: 12),
+                ),
               );
             },
           ),

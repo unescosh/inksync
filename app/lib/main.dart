@@ -69,17 +69,10 @@ class InkSyncApp extends ConsumerStatefulWidget {
 }
 
 class _InkSyncAppState extends ConsumerState<InkSyncApp> with WidgetsBindingObserver {
-  Timer? _pollTimer;
-
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // 轮询兜底：WebDAV 没有推送，只能靠周期拉取。
-    // 命中 304 时一次请求约 200 字节，成本极低。
-    _pollTimer = Timer.periodic(const Duration(minutes: 5), (_) {
-      ref.read(syncTriggerProvider.notifier).syncNow();
-    });
     WidgetsBinding.instance.addPostFrameCallback((_) => _bootstrap());
   }
 
@@ -102,7 +95,6 @@ class _InkSyncAppState extends ConsumerState<InkSyncApp> with WidgetsBindingObse
 
   @override
   void dispose() {
-    _pollTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -117,6 +109,9 @@ class _InkSyncAppState extends ConsumerState<InkSyncApp> with WidgetsBindingObse
 
   @override
   Widget build(BuildContext context) {
+    // 启动自动同步轮询控制器（替代写死的 5 分钟定时器）。
+    // 它随同步偏好变化自动重排程；本 widget 常驻，provider 不会被回收。
+    ref.watch(pollingControllerProvider);
     return MaterialApp(
       title: 'InkSync · 墨阅',
       debugShowCheckedModeBanner: false,
