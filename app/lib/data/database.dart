@@ -178,8 +178,46 @@ class ConflictLog extends Table {
   BoolColumn get dismissed => boolean().withDefault(const Constant(false))();
 }
 
+/// 阅读批注（读书笔记）。
+///
+/// 与书籍/进度一样走同步：本地新增/删除都写 outbox，`SyncEngine` 用同样的三方合并
+/// 流水线把批注跨端同步（批注是个人财产，但三端都想看到自己写的笔记，故同步而非本地偏好）。
+///
+/// 定位：文本书用 `(chapter, charOffset)` 全书字符偏移；图片书（漫画/PDF）`chapter` 无意义，
+/// `charOffset` 直接存 page index。阅读器点笔记可跳回原处。
+@DataClassName('AnnotationRow')
+class Annotations extends Table {
+  TextColumn get id => text()();
+  TextColumn get bookId => text()();
+  IntColumn get chapter => integer().withDefault(const Constant(0))();
+  IntColumn get charOffset => integer().withDefault(const Constant(0))();
+  TextColumn get quote => text().nullable()(); // 被批注的原文片段（展示用，可空）
+  TextColumn get note => text()(); // 用户笔记正文
+  DateTimeColumn get createdAt => dateTime()();
+  DateTimeColumn get updatedAt => dateTime()();
+
+  // 同步字段
+  TextColumn get hlc => text()();
+  TextColumn get updatedBy => text()();
+  BoolColumn get deleted => boolean().withDefault(const Constant(false))();
+  TextColumn get baseJson => text().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
 @DriftDatabase(
-  tables: [Books, Progresses, Collections, Memberships, Rules, Outbox, SyncStates, ConflictLog],
+  tables: [
+    Books,
+    Progresses,
+    Collections,
+    Memberships,
+    Rules,
+    Outbox,
+    SyncStates,
+    ConflictLog,
+    Annotations,
+  ],
 )
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_open());
@@ -187,16 +225,25 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.e);
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
         onCreate: (m) async => await m.createAll(),
+        onUpgrade: (m, from, to) async {
+          // v2：新增批注表 Annotations。
+          if (from < 2) {
+            await m.createTable(annotations);
+          }
+        },
         beforeOpen: (details) async {
           await customStatement('PRAGMA foreign_keys = ON');
           // 同步依赖"按 hlc 扫描未推送记录"，这个索引是热点
           await customStatement('CREATE INDEX IF NOT EXISTS idx_outbox_hlc ON outbox(hlc)');
           await customStatement('CREATE INDEX IF NOT EXISTS idx_books_hlc ON books(hlc)');
+          await customStatement(
+            'CREATE INDEX IF NOT EXISTS idx_annotations_book ON annotations(book_id)',
+          );
         },
       );
 
@@ -474,6 +521,41 @@ class AppDatabase extends _$AppDatabase {
           winner: winner,
         ),
       );
+
+  /// 某本书的批注列表，按全书字符偏移升序（图片书按 page index）。软删的不显示。
+  Stream<List<AnnotationRow>> watchAnnotations(String bookId) =>
+      (select(annotations)
+            ..where((t) => t.bookId.equals(bookId) & t.deleted.equals(false))
+            ..orderBy([(t) => OrderingTerm.asc(t.charOffset)]))
+          .watch();
+
+  /// 删除批注：墓碑软删（与书籍一致，离线端同步后也删），并写 outbox。
+  Future<void> tombstoneAnnotation({
+    required String id,
+    required String hlc,
+    required String deviceId,
+  }) async {
+    await (update(annotations)..where((t) => t.id.equals(id))).write(
+      AnnotationsCompanion(
+        deleted: const Value(true),
+        hlc: Value(hlc),
+        updatedBy: Value(deviceId),
+        updatedAt: Value(DateTime.now().toUtc()),
+      ),
+    );
+    await into(outbox).insert(OutboxCompanion.insert(
+      entityType: 'annotation',
+      entityId: id,
+      op: 'delete',
+      payloadJson: jsonEncode({
+        'id': id,
+        'deleted': true,
+        'hlc': hlc,
+        'updatedBy': deviceId,
+      }),
+      hlc: hlc,
+    ));
+  }
 }
 
 // ─────────────────────────── 排序 / 分组 ───────────────────────────

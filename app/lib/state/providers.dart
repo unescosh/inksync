@@ -312,6 +312,12 @@ final bookCollectionsProvider = StreamProvider.family<Set<String>, String>((ref,
   return ref.watch(databaseProvider).watchBookCollectionIds(bookId);
 });
 
+/// 某本书的批注列表（按全书字符偏移升序），阅读器笔记面板用。
+final bookAnnotationsProvider =
+    StreamProvider.family<List<AnnotationRow>, String>((ref, bookId) {
+  return ref.watch(databaseProvider).watchAnnotations(bookId);
+});
+
 // ─────────────────────────── 高亮规则 ───────────────────────────
 
 final rawRulesProvider = StreamProvider<List<RuleRow>>((ref) {
@@ -685,3 +691,82 @@ class LibraryActions {
 }
 
 final libraryActionsProvider = Provider<LibraryActions>((ref) => LibraryActions(ref));
+
+// ─────────────────────────── 批注（读书笔记） ───────────────────────────
+
+/// 批注的写操作：增/删都走"改库 → 写 outbox → markDirty"，与书籍/进度一致，可跨端同步。
+class AnnotationActions {
+  AnnotationActions(this._ref);
+
+  final Ref _ref;
+
+  /// 在当前阅读位置加一条笔记。
+  ///
+  /// [chapter]/[charOffset] 是定位信息：文本书用全书字符偏移，图片书 [charOffset] 即 page index。
+  /// [quote] 可选，存被批注的原文片段便于回看。
+  Future<void> addAnnotation({
+    required String bookId,
+    required int chapter,
+    required int charOffset,
+    String? quote,
+    required String note,
+  }) async {
+    final db = _ref.read(databaseProvider);
+    final clock = await _ref.read(hlcClockProvider.future);
+    final deviceId = await _ref.read(deviceIdProvider.future);
+    final id = newUuidV4();
+    final now = DateTime.now().toUtc();
+    final hlc = clock.tick();
+
+    await db.into(db.annotations).insert(
+          AnnotationsCompanion.insert(
+            id: id,
+            bookId: bookId,
+            chapter: Value(chapter),
+            charOffset: Value(charOffset),
+            quote: Value(quote),
+            note: note,
+            createdAt: now,
+            updatedAt: now,
+            hlc: hlc.encode(),
+            updatedBy: deviceId,
+            deleted: const Value(false),
+            baseJson: const Value(null),
+          ),
+        );
+    await db.into(db.outbox).insert(
+          OutboxCompanion.insert(
+            entityType: 'annotation',
+            entityId: id,
+            op: 'upsert',
+            payloadJson: jsonEncode({
+              'id': id,
+              'bookId': bookId,
+              'chapter': chapter,
+              'charOffset': charOffset,
+              'quote': quote,
+              'note': note,
+              'createdAt': now.toIso8601String(),
+              'updatedAt': now.toIso8601String(),
+              'hlc': hlc.encode(),
+              'updatedBy': deviceId,
+              'deleted': false,
+            }),
+            hlc: hlc.encode(),
+          ),
+        );
+    _ref.read(syncTriggerProvider.notifier).markDirty();
+  }
+
+  /// 删除批注：墓碑软删 + outbox，跨端同步删除。
+  Future<void> deleteAnnotation(String id) async {
+    final db = _ref.read(databaseProvider);
+    final clock = await _ref.read(hlcClockProvider.future);
+    final deviceId = await _ref.read(deviceIdProvider.future);
+    final hlc = clock.tick();
+    await db.tombstoneAnnotation(id: id, hlc: hlc.encode(), deviceId: deviceId);
+    _ref.read(syncTriggerProvider.notifier).markDirty();
+  }
+}
+
+final annotationActionsProvider = Provider<AnnotationActions>((ref) => AnnotationActions(ref));

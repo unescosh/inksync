@@ -437,12 +437,31 @@ class SyncEngine {
           read: () async {
             final r = await (db.select(db.memberships)
               ..where((t) => t.id.equals(id)))
-                .getSingleOrNull();
+              .getSingleOrNull();
             return r == null ? null : _membershipToMap(r);
           },
           write: (m) => db.into(db.memberships).insertOnConflictUpdate(_membershipCompanion(m)),
           base: () async => null,
           putBase: (m) async {},
+        );
+      case 'annotation':
+        await _mergeInto(
+          table: 'annotation',
+          id: id,
+          remote: (rec['d'] as Map?)?.cast<String, dynamic>(),
+          op: op,
+          remoteHlc: remoteHlc,
+          node: node,
+          report: report,
+          read: () async {
+            final r = await (db.select(db.annotations)
+              ..where((t) => t.id.equals(id)))
+              .getSingleOrNull();
+            return r == null ? null : _annotationToMap(r);
+          },
+          write: (m) => db.into(db.annotations).insertOnConflictUpdate(_annotationCompanion(m)),
+          base: () async => _baseOf('annotation', id),
+          putBase: (m) => _putBase('annotation', id, m),
         );
     }
   }
@@ -911,6 +930,35 @@ MembershipsCompanion _membershipCompanion(Map<String, dynamic> m) => Memberships
       removed: Value(m['removed'] == true),
       hlc: m['hlc'] as String? ?? Hlc.zero.encode(),
       updatedBy: m['updatedBy'] as String? ?? '',
+    );
+
+Map<String, dynamic> _annotationToMap(AnnotationRow r) => {
+      'id': r.id,
+      'bookId': r.bookId,
+      'chapter': r.chapter,
+      'charOffset': r.charOffset,
+      'quote': r.quote,
+      'note': r.note,
+      'createdAt': r.createdAt.toIso8601String(),
+      'updatedAt': r.updatedAt.toIso8601String(),
+      'hlc': r.hlc,
+      'updatedBy': r.updatedBy,
+      'deleted': r.deleted,
+    };
+
+AnnotationsCompanion _annotationCompanion(Map<String, dynamic> m) => AnnotationsCompanion.insert(
+      id: m['id'] as String,
+      bookId: m['bookId'] as String? ?? '',
+      chapter: Value((m['chapter'] as num?)?.toInt() ?? 0),
+      charOffset: Value((m['charOffset'] as num?)?.toInt() ?? 0),
+      quote: Value(m['quote'] as String?),
+      note: m['note'] as String? ?? '',
+      createdAt: DateTime.tryParse(m['createdAt'] as String? ?? '') ?? DateTime.now(),
+      updatedAt: DateTime.tryParse(m['updatedAt'] as String? ?? '') ?? DateTime.now(),
+      hlc: m['hlc'] as String? ?? Hlc.zero.encode(),
+      updatedBy: m['updatedBy'] as String? ?? '',
+      deleted: Value(m['deleted'] == true),
+      baseJson: Value(m['baseJson'] as String?),
     );
 
 extension _FirstOrNullEtag on List<DavEntry> {

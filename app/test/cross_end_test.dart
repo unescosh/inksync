@@ -676,4 +676,74 @@ void main() {
 
     await a.close();
   });
+
+  test('批注能跨端同步（新增 + 墓碑删除）', () async {
+    // 验证 annotation 作为同步实体：A 加批注（带原文引用 + 定位偏移）→ B 拉到；
+    // A 删除（墓碑软删）→ B 同步到 deleted=true。与书籍/进度同一条 outbox 流水线。
+    final a = AppDatabase.forTesting(NativeDatabase.memory());
+    final b = AppDatabase.forTesting(NativeDatabase.memory());
+    final client = MockWebDavClient();
+    final h = Hlc(wallMs: 1000, counter: 0, node: 'aaaaaaaa');
+    const bookId = 'book-anno';
+    const annoId = 'anno-1';
+
+    // —— A 端加批注（chapters=2 的偏移定位 + 80 字内的原文引用）——
+    await a.into(a.annotations).insert(AnnotationsCompanion.insert(
+      id: annoId,
+      bookId: bookId,
+      chapter: const Value(2),
+      charOffset: const Value(1234),
+      quote: const Value('此处伏笔'),
+      note: '作者早有暗示',
+      createdAt: DateTime.parse(_t),
+      updatedAt: DateTime.parse(_t),
+      hlc: h.encode(),
+      updatedBy: 'aaaaaaaa',
+    ));
+    await enqueueRaw(a, 'annotation', annoId, 'upsert', {
+      'id': annoId,
+      'bookId': bookId,
+      'chapter': 2,
+      'charOffset': 1234,
+      'quote': '此处伏笔',
+      'note': '作者早有暗示',
+      'createdAt': DateTime.parse(_t).toIso8601String(),
+      'updatedAt': DateTime.parse(_t).toIso8601String(),
+      'hlc': h.encode(),
+      'updatedBy': 'aaaaaaaa',
+      'deleted': false,
+    }, h.encode());
+
+    // —— A 推，B 拉 ——
+    final repA = await makeEngine(a, client, 'aaaaaaaa').sync();
+    expect(repA.ok, isTrue);
+    final repB = await makeEngine(b, client, 'bbbbbbbb').sync();
+    expect(repB.ok, isTrue);
+    expect(repB.pulledChanges, greaterThan(0), reason: 'B 应拉到 A 的批注');
+
+    final bAnno = await (b.select(b.annotations)
+        ..where((t) => t.id.equals(annoId)))
+        .getSingle();
+    expect(bAnno.bookId, bookId);
+    expect(bAnno.charOffset, 1234, reason: '定位偏移应同步');
+    expect(bAnno.quote, '此处伏笔', reason: '原文引用应同步');
+    expect(bAnno.note, '作者早有暗示', reason: '笔记正文应同步');
+    expect(bAnno.deleted, isFalse);
+
+    // —— A 删除（墓碑软删）→ B 同步删除标记 ——
+    final h2 = Hlc(wallMs: 2000, counter: 0, node: 'aaaaaaaa');
+    await a.tombstoneAnnotation(
+        id: annoId, hlc: h2.encode(), deviceId: 'aaaaaaaa');
+    await makeEngine(a, client, 'aaaaaaaa').sync();
+    final repB2 = await makeEngine(b, client, 'bbbbbbbb').sync();
+    expect(repB2.ok, isTrue);
+
+    final bAnno2 = await (b.select(b.annotations)
+        ..where((t) => t.id.equals(annoId)))
+        .getSingle();
+    expect(bAnno2.deleted, isTrue, reason: '批注墓碑应跨端同步');
+
+    await a.close();
+    await b.close();
+  });
 }

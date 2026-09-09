@@ -311,6 +311,11 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
               onPressed: _showToc,
             ),
           IconButton(
+            icon: const Icon(Icons.note_add),
+            tooltip: '笔记',
+            onPressed: _showNotes,
+          ),
+          IconButton(
             icon: const Icon(Icons.palette),
             tooltip: '高亮规则',
             onPressed: () => Navigator.of(context).pushNamed('/rules'),
@@ -468,6 +473,230 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         fit: BoxFit.contain,
       ),
     );
+  }
+
+  /// 笔记面板：列出本书所有批注（按全书字符偏移升序），支持新增 / 跳转 / 删除。
+  ///
+  /// 新增批注在当前阅读位置（文本书用章节+滚动比例反算的全局字符偏移；图片书用 page
+  /// index）落点，并带走一句可见原文做回看提示，写入后自动触发同步。删除走墓碑软删，
+  /// 同步到其它端。
+  void _showNotes() {
+    final book = _book!;
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => Consumer(
+        builder: (ctx, ref, _) {
+          final notes = ref.watch(bookAnnotationsProvider(widget.bookId));
+          return DraggableScrollableSheet(
+            initialChildSize: 0.6,
+            minChildSize: 0.35,
+            maxChildSize: 0.92,
+            expand: false,
+            builder: (_, scroll) => Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 12, 4),
+                  child: Row(
+                    children: [
+                      Text('笔记', style: Theme.of(ctx).textTheme.titleMedium),
+                      const SizedBox(width: 8),
+                      Text('${book.title}',
+                          style: Theme.of(ctx).textTheme.bodySmall,
+                          overflow: TextOverflow.ellipsis),
+                      const Spacer(),
+                      TextButton.icon(
+                        icon: const Icon(Icons.add, size: 18),
+                        label: const Text('添加'),
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          _addNoteDialog();
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 1),
+                Expanded(
+                  child: notes.when(
+                    loading: () =>
+                        const Center(child: CircularProgressIndicator()),
+                    error: (e, _) => Center(child: Text('加载失败：$e')),
+                    data: (list) {
+                      if (list.isEmpty) {
+                        return const Center(
+                          child: Padding(
+                            padding: EdgeInsets.all(24),
+                            child: Text('还没有笔记，点右上角"添加"记录此刻。',
+                                textAlign: TextAlign.center),
+                          ),
+                        );
+                      }
+                      return ListView.separated(
+                        controller: scroll,
+                        itemCount: list.length,
+                        separatorBuilder: (_, __) => const Divider(height: 1),
+                        itemBuilder: (context, i) {
+                          final a = list[i];
+                          return ListTile(
+                            title: a.quote != null && a.quote!.isNotEmpty
+                                ? Text('「${a.quote}」',
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                        fontStyle: FontStyle.italic))
+                                : const Text('（无原文）',
+                                    style: TextStyle(fontStyle: FontStyle.italic)),
+                            subtitle: Text(a.note,
+                                maxLines: 3, overflow: TextOverflow.ellipsis),
+                            trailing: PopupMenuButton<String>(
+                              onSelected: (v) {
+                                if (v == 'goto') {
+                                  Navigator.pop(ctx);
+                                  _jumpToAnnotation(a);
+                                } else if (v == 'delete') {
+                                  _deleteAnnotation(a.id);
+                                }
+                              },
+                              itemBuilder: (_) => const [
+                                PopupMenuItem(
+                                    value: 'goto', child: Text('跳转到此处')),
+                                PopupMenuItem(value: 'delete', child: Text('删除')),
+                              ],
+                            ),
+                          );
+                        },
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// 新增批注对话框：在当前阅读位置落点，带走一句可见原文。
+  Future<void> _addNoteDialog() async {
+    final book = _book;
+    if (book == null) return;
+
+    int chapter;
+    int charOffset;
+    String? quote;
+    if (book.isImageBook) {
+      chapter = 0;
+      charOffset = _page;
+    } else {
+      // 与 _saveProgress 同款反算：章节内滚动比例 → 全局字符偏移
+      var beforeChars = 0;
+      for (var i = 0; i < _chapter && i < book.chapters.length; i++) {
+        beforeChars += book.chapters[i].plain.length;
+      }
+      final chapterChars = _chapter < book.chapters.length
+          ? book.chapters[_chapter].plain.length
+          : 0;
+      if (!_scroll.hasClients) {
+        chapter = _chapter;
+        charOffset = beforeChars;
+      } else {
+        final max = _scroll.position.maxScrollExtent;
+        final fraction = max <= 0
+            ? 0.0
+            : (_scroll.offset / max).clamp(0.0, 1.0);
+        charOffset = beforeChars + (chapterChars * fraction).round();
+        chapter = _chapter;
+      }
+      final blocks = _blocks ?? const <ContentBlock>[];
+      final visibleText = blocks.isNotEmpty ? blocks.first.plainText : '';
+      quote = visibleText.isNotEmpty
+          ? (visibleText.length > 80
+              ? visibleText.substring(0, 80)
+              : visibleText)
+          : null;
+    }
+
+    final noteCtl = TextEditingController();
+    final result = await showDialog<String>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        title: const Text('添加笔记'),
+        content: TextField(
+          controller: noteCtl,
+          autofocus: true,
+          maxLines: 4,
+          decoration: const InputDecoration(
+            hintText: '写点什么…',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dctx),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dctx, noteCtl.text.trim()),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    noteCtl.dispose();
+    if (result == null || result.isEmpty) return;
+
+    await ref.read(annotationActionsProvider).addAnnotation(
+          bookId: widget.bookId,
+          chapter: chapter,
+          charOffset: charOffset,
+          quote: quote,
+          note: result,
+        );
+  }
+
+  /// 跳转回某条批注的位置：图片书跳页、文本书跳章节并按 charOffset 反算章内比例。
+  Future<void> _jumpToAnnotation(AnnotationRow a) async {
+    final book = _book;
+    if (book == null) return;
+    if (book.isImageBook) {
+      await _gotoPage(a.charOffset);
+      return;
+    }
+    if (book.chapters.isEmpty) return;
+    final idx = a.chapter.clamp(0, book.chapters.length - 1);
+    final start = book.chapters[idx].charStart;
+    final len = book.chapters[idx].plain.length;
+    final fraction =
+        len <= 0 ? 0.0 : ((a.charOffset - start) / len).clamp(0.0, 1.0);
+    setState(() => _chapter = idx);
+    await _prepareChapter(scrollTo: fraction);
+    await _saveProgress();
+  }
+
+  /// 删除批注：确认后走墓碑软删（AnnotationActions.deleteAnnotation 已含 outbox + 同步触发）。
+  Future<void> _deleteAnnotation(String id) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        title: const Text('删除笔记'),
+        content: const Text('确定删除这条笔记吗？删除会同步到其它端。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dctx, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirm == true) {
+      await ref.read(annotationActionsProvider).deleteAnnotation(id);
+    }
   }
 
   void _showToc() {
