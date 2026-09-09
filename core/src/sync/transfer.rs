@@ -367,6 +367,118 @@ impl CoverStore for FsCoverStore {
     }
 }
 
+// ─────────────────────────── 无头 CLI 辅助（扫描本地目录 → 传输条目） ───────────────────────────
+//
+// 给 UOS / CLI 路径一个最小可用的入口：扫描本地书目录与封面目录，按内容寻址构建
+// 传输条目，再交给 transfer_blobs / transfer_covers。无需数据库或完整 SyncEngine。
+
+/// 书籍文件扩展名（与 core 解析支持的格式对齐）
+pub fn is_book_file(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref(),
+        Some("epub")
+            | Some("mobi")
+            | Some("azw")
+            | Some("azw3")
+            | Some("txt")
+            | Some("pdf")
+            | Some("cbz")
+            | Some("cbr")
+    )
+}
+
+/// 封面图片扩展名
+pub fn is_cover_file(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref(),
+        Some("jpg") | Some("jpeg") | Some("png") | Some("webp") | Some("gif")
+    )
+}
+
+/// 递归扫描目录下的书籍文件，按内容寻址构建传输条目。
+/// 书名取文件名（去扩展名）；sha256 用流式计算（大文件不整体读内存）。
+pub fn scan_book_dir(dir: &Path) -> Result<Vec<BlobEntry>> {
+    let mut out = Vec::new();
+    collect_books(dir, &mut out)?;
+    Ok(out)
+}
+
+fn collect_books(dir: &Path, out: &mut Vec<BlobEntry>) -> Result<()> {
+    for ent in std::fs::read_dir(dir)? {
+        let ent = ent?;
+        let path = ent.path();
+        if path.is_dir() {
+            collect_books(&path, out)?;
+        } else if is_book_file(&path) {
+            let sha = crate::sha256_file(&path)?;
+            let title = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            out.push(BlobEntry { title, sha256: sha, local_path: Some(path) });
+        }
+    }
+    Ok(())
+}
+
+/// 把封面目录里的图片按「文件名（去扩展名）」与书籍配对，构建封面传输条目。
+/// 封面按 coverHash 内容寻址（字节 sha256）。
+pub fn pair_covers(books: &[BlobEntry], covers_dir: &Path) -> Result<Vec<CoverEntry>> {
+    if !covers_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for ent in std::fs::read_dir(covers_dir)? {
+        let ent = ent?;
+        let path = ent.path();
+        if path.is_dir() || !is_cover_file(&path) {
+            continue;
+        }
+        let stem = match path.file_stem() {
+            Some(s) => s.to_string_lossy().into_owned(),
+            None => continue,
+        };
+        if books.iter().any(|b| b.title == stem) {
+            let hash = crate::sha256_file(&path)?;
+            out.push(CoverEntry { title: stem, cover_hash: hash, local_path: Some(path) });
+        }
+    }
+    Ok(out)
+}
+
+/// 枚举远端 `blobs/` 与 `covers/` 下所有内容寻址条目（用于 pull/restore 模式：
+/// 把本地没有的书/封面也按 sha256 拉回来）。返回 `(blob_sha 列表, cover_hash 列表)`。
+pub fn list_remote<F: DavFs>(
+    fs: &F,
+    cfg: &WebDavConfig,
+    remote_root: &str,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let root = remote_root.trim_end_matches('/');
+    let mut blobs = Vec::new();
+    let mut covers = Vec::new();
+    for i in 0..256u32 {
+        let bp = format!("{root}/blobs/{i:02x}");
+        for n in fs.list_names(cfg, &bp)? {
+            if !n.is_empty() && !n.contains('/') {
+                blobs.push(n);
+            }
+        }
+        let cp = format!("{root}/covers/{i:02x}");
+        for n in fs.list_names(cfg, &cp)? {
+            if !n.is_empty() && !n.contains('/') {
+                covers.push(n);
+            }
+        }
+    }
+    Ok((blobs, covers))
+}
+
 // ─────────────────────────── 单测（内存 WebDAV + 内存仓库，无需真实服务器） ───────────────────────────
 
 #[cfg(test)]
@@ -601,5 +713,59 @@ mod tests {
         assert_eq!(cover_ext(b"GIF89a"), ".gif");
         assert_eq!(cover_ext(b"RIFFxxxxWEBP"), ".webp");
         assert_eq!(cover_ext(b"????"), ".jpg"); // 未知兜底 jpg
+    }
+
+    /// 端到端跑通「CLI 扫描本地目录 → 配对封面 → 推到远端」的最小路径，
+    /// 验证 scan_book_dir / pair_covers / transfer_blobs / transfer_covers 串起来可用。
+    #[test]
+    fn cli_scan_pair_and_transfer() {
+        let base = std::env::temp_dir().join(format!("inksync_cli_{}", nanos()));
+        let books_dir = base.join("books");
+        let covers_dir = base.join("covers");
+        std::fs::create_dir_all(&books_dir).unwrap();
+        std::fs::create_dir_all(&covers_dir).unwrap();
+
+        let book_path = books_dir.join("我的漫画.epub");
+        std::fs::write(&book_path, b"inksync cli book payload").unwrap();
+        let cover_path = covers_dir.join("我的漫画.jpg");
+        std::fs::write(&cover_path, jpeg_cover()).unwrap();
+
+        // 扫描 + 配对
+        let books = scan_book_dir(&books_dir).unwrap();
+        assert_eq!(books.len(), 1, "应扫到 1 本书");
+        assert_eq!(books[0].title, "我的漫画");
+        let covers = pair_covers(&books, &covers_dir).unwrap();
+        assert_eq!(covers.len(), 1, "应按书名配对到 1 张封面");
+        assert_eq!(covers[0].title, "我的漫画");
+
+        // 推到远端（MemDav 模拟 WebDAV）
+        let dav = MemDav { store: RefCell::new(HashMap::new()) };
+        let cfg = cfg();
+        let store = FsBlobStore::new(base.join("local_store"));
+        let cover_store = FsCoverStore::new(base.join("local_store"));
+        let mut rep = SyncReport::default();
+        transfer_blobs(&dav, &cfg, "inksync", &books, &store, &mut rep, |_, _| {}).unwrap();
+        transfer_covers(&dav, &cfg, "inksync", &covers, &cover_store, &mut rep, |_, _| {}).unwrap();
+
+        assert_eq!(rep.uploaded_books, 1, "应上传 1 本书");
+        assert_eq!(rep.uploaded_covers, 1, "应上传 1 张封面");
+        assert_eq!(rep.errors.len(), 0, "不应有错误");
+        assert!(
+            dav.store.borrow().keys().any(|k| k.contains("/blobs/")),
+            "远端应有 blobs 条目"
+        );
+        assert!(
+            dav.store.borrow().keys().any(|k| k.contains("/covers/")),
+            "远端应有 covers 条目"
+        );
+
+        // 幂等：二次推送不再重复上传
+        let mut rep2 = SyncReport::default();
+        transfer_blobs(&dav, &cfg, "inksync", &books, &store, &mut rep2, |_, _| {}).unwrap();
+        transfer_covers(&dav, &cfg, "inksync", &covers, &cover_store, &mut rep2, |_, _| {}).unwrap();
+        assert_eq!(rep2.uploaded_books, 0, "幂等：不应重复上传书");
+        assert_eq!(rep2.uploaded_covers, 0, "幂等：不应重复上传封面");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
