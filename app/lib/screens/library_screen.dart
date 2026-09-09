@@ -63,7 +63,15 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
       LibraryQuery(sort: sort, keyword: _search.text, collectionId: _selectedCollectionId),
     ));
     final collectionsAsync = ref.watch(collectionsProvider);
-    final syncing = ref.watch(syncTriggerProvider).isLoading;
+    final syncState = ref.watch(syncTriggerProvider);
+    final syncing = syncState.isLoading;
+    // 待备份改动数：书架常驻展示，让用户一眼看到"还有多少没同步"
+    final pending = ref.watch(pendingOutboxCountProvider).valueOrNull ?? 0;
+    // 上次同步是否出错（异常或 report 非空但 ok=false）—— AppBar 图标转红
+    final syncError = syncState.hasError || (syncState.value?.ok == false);
+    // 未配置同步服务器 → 首屏引导去设置
+    final webdavCfg = ref.watch(webdavConfigProvider);
+    final serverUnconfigured = webdavCfg.hasValue && webdavCfg.value == null;
 
     return Scaffold(
       appBar: AppBar(
@@ -94,14 +102,25 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
             onPressed: () => Navigator.of(context).pushNamed('/rules'),
           ),
           IconButton(
-            icon: syncing
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.sync),
-            tooltip: '立即同步',
+            icon: Badge(
+              label: Text('$pending'),
+              isLabelVisible: pending > 0,
+              child: syncing
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Icon(
+                      syncError ? Icons.sync_problem : Icons.sync,
+                      color: syncError
+                          ? Theme.of(context).colorScheme.error
+                          : null,
+                    ),
+            ),
+            tooltip: syncing
+                ? '同步中…'
+                : (syncError ? '上次同步出错' : '立即同步'),
             onPressed: syncing ? null : ref.read(syncTriggerProvider.notifier).syncNow,
           ),
           IconButton(
@@ -123,9 +142,16 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
               selectedId: _selectedCollectionId,
               onSelect: (id) => setState(() => _selectedCollectionId = id),
             ),
-      body: Row(
+      body: Column(
         children: [
-          if (_isDesktop) ...[
+          if (serverUnconfigured)
+            _SyncSetupBanner(
+              onOpen: () => Navigator.of(context).pushNamed('/settings'),
+            ),
+          Expanded(
+            child: Row(
+              children: [
+                if (_isDesktop) ...[
             SizedBox(
               width: 220,
               child: _CollectionsPane(
@@ -143,6 +169,8 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
               data: (books) => _buildBooks(books, sort, group),
             ),
           ),
+          ],
+        ),
         ],
       ),
       floatingActionButton: FloatingActionButton(
@@ -262,6 +290,42 @@ class _ReorderHint extends StatelessWidget {
 }
 
 // ─────────────────────────── 排序 / 分组菜单 ───────────────────────────
+
+class _SyncSetupBanner extends StatelessWidget {
+  const _SyncSetupBanner({required this.onOpen});
+
+  final VoidCallback onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.tertiaryContainer,
+      child: InkWell(
+        onTap: onOpen,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(
+            children: [
+              Icon(Icons.cloud_off, size: 18, color: scheme.onTertiaryContainer),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '尚未配置同步服务器，点此设置 WebDAV 后即可在三端备份与同步',
+                  style: Theme.of(context)
+                      .textTheme
+                      .bodySmall
+                      ?.copyWith(color: scheme.onTertiaryContainer),
+                ),
+              ),
+              const Icon(Icons.chevron_right),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 class _SortMenu extends StatelessWidget {
   const _SortMenu({required this.sort, required this.onChanged});
