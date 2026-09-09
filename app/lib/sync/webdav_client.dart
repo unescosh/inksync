@@ -179,6 +179,27 @@ class WebDavClient {
     return Uint8List.fromList(resp.data ?? const []);
   }
 
+  /// 流式下载（避免大文件整块进内存）。返回字节块流，调用方边收边落盘 + 增量校验。
+  ///
+  /// 与 [getBytes] 的区别：不把整份响应攒进一个 [Uint8List]，而是按需吐出分块，
+  /// 便于边收边写文件、边算 sha256，把峰值内存从「文件大小」压到「缓冲区大小」。
+  Stream<Uint8List> getBytesStream(
+    String path, {
+    void Function(int, int)? onProgress,
+  }) async* {
+    final resp = await _do(
+      () => _dio.get<ResponseBody>(
+        _url(path),
+        options: Options(responseType: ResponseType.stream),
+        onReceiveProgress: onProgress,
+      ),
+    );
+    final stream = resp.data?.stream ?? const Stream<Uint8List>.empty();
+    await for (final chunk in stream) {
+      yield Uint8List.fromList(chunk);
+    }
+  }
+
   /// 条件 GET。这是"低成本轮询"的关键：manifest 没变时服务端只回 304（约 200 字节）。
   Future<DavGetResult?> getIfChanged(String path, String? etag) async {
     final headers = <String, dynamic>{};
@@ -249,6 +270,54 @@ class WebDavClient {
   }) async {
     final tmp = '$path.tmp-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}-${_rng.nextInt(1 << 20)}';
     await put(tmp, body, onProgress: onProgress);
+    try {
+      await move(tmp, path);
+    } catch (e) {
+      await deleteQuietly(tmp);
+      rethrow;
+    }
+  }
+
+  /// 底层流式 PUT：请求体是一个字节流，[contentLength] 为已知总字节数。
+  ///
+  /// 给 WebDAV 服务端带 `Content-Length` 比依赖分块传输编码更稳妥（部分实现
+  /// 对 chunked PUT 支持差）。调用方负责提供长度（例如本地文件 `File.length()`）。
+  /// 进度回调 [onProgress] 取 (已发, 总长)。
+  Future<void> putStream(
+    String path,
+    Stream<List<int>> body, {
+    required int contentLength,
+    void Function(int, int)? onProgress,
+  }) async {
+    await _do(
+      () => _dio.put(
+        _url(path),
+        data: body,
+        options: Options(
+          headers: <String, dynamic>{
+            'Content-Type': 'application/octet-stream',
+            'Content-Length': contentLength,
+          },
+          validateStatus: (s) => s != null && (s == 200 || s == 201 || s == 204),
+        ),
+        onSendProgress: onProgress,
+      ),
+      accept: const {200, 201, 204},
+    );
+  }
+
+  /// 流式「原子」写入：PUT 临时名（流式）→ MOVE 正式名。
+  ///
+  /// 与 [putAtomic] 语义一致、只是请求体换成流，避免大书整文件进内存引发 OOM。
+  /// 半截文件 / 并发覆盖的防护同样来自「先临时名再 MOVE」。
+  Future<void> putAtomicStream(
+    String path,
+    Stream<List<int>> body, {
+    required int contentLength,
+    void Function(int, int)? onProgress,
+  }) async {
+    final tmp = '$path.tmp-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}-${_rng.nextInt(1 << 20)}';
+    await putStream(tmp, body, contentLength: contentLength, onProgress: onProgress);
     try {
       await move(tmp, path);
     } catch (e) {

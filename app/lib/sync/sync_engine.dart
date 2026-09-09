@@ -655,11 +655,18 @@ class SyncEngine {
         final remoteHas = await _remoteHasBlob(b.sha256);
         if (!remoteHas) {
           try {
-            final bytes = await File(localPath).readAsBytes();
-            await client.putAtomic(remotePath, bytes, onProgress: (sent, total) {
-              _emit(SyncPhase.transferring, '上传《${b.title}》',
-                  total == 0 ? null : sent / total);
-            });
+            final file = File(localPath);
+            final len = await file.length();
+            await client.putAtomicStream(
+              remotePath,
+              file.openRead(),
+              contentLength: len,
+              onProgress: (sent, total) => _emit(
+                SyncPhase.transferring,
+                '上传《${b.title}》',
+                total <= 0 ? null : sent / total,
+              ),
+            );
             report.uploadedBooks++;
           } catch (e) {
             report.errors.add('上传《${b.title}》失败: $e');
@@ -668,18 +675,37 @@ class SyncEngine {
         continue;
       }
 
-      // 下载：本地没文件、远端有 → 下（并校验 sha256）
+      // 下载：本地没文件、远端有 → 下（流式 + 增量校验 sha256，避免整文件进内存）
       try {
         final exists = await _remoteHasBlob(b.sha256);
         if (!exists) continue;
-        final bytes = await client.getBytes(remotePath);
-        final actual = _sha256OfBytes(bytes);
+        final tmp = File(p.join(Directory.systemTemp.path, '${b.sha256}.dl'));
+        final sink = tmp.openWrite();
+        final hashSink = sha256.newSink();
+        try {
+          await for (final chunk in client.getBytesStream(remotePath,
+              onProgress: (sent, total) => _emit(
+                SyncPhase.transferring,
+                '下载《${b.title}》',
+                total <= 0 ? null : sent / total,
+              ))) {
+            sink.add(chunk);
+            hashSink.add(chunk);
+          }
+          await sink.flush();
+          await sink.close();
+          hashSink.close();
+        } catch (e) {
+          await sink.close().catchError((_) {});
+          await tmp.delete().catchError((_) {});
+          rethrow;
+        }
+        final actual = hashSink.hash.toString();
         if (actual != b.sha256) {
+          await tmp.delete();
           report.errors.add('《${b.title}》校验失败，已丢弃');
           continue;
         }
-        final tmp = File(p.join(Directory.systemTemp.path, b.sha256));
-        await tmp.writeAsBytes(bytes, flush: true);
         final dest = await blobs.importFile(tmp.path, b.sha256);
         await tmp.delete();
         await (db.update(db.books)..where((t) => t.id.equals(b.id)))
@@ -713,11 +739,18 @@ class SyncEngine {
       if (localPath != null && await File(localPath).exists()) {
         if (!await _remoteHasCover(hash)) {
           try {
-            final bytes = await File(localPath).readAsBytes();
-            await client.putAtomic(remotePath, bytes, onProgress: (sent, total) {
-              _emit(SyncPhase.transferring, '上传《${b.title}》封面',
-                  total == 0 ? null : sent / total);
-            });
+            final file = File(localPath);
+            final len = await file.length();
+            await client.putAtomicStream(
+              remotePath,
+              file.openRead(),
+              contentLength: len,
+              onProgress: (sent, total) => _emit(
+                SyncPhase.transferring,
+                '上传《${b.title}》封面',
+                total <= 0 ? null : sent / total,
+              ),
+            );
             report.uploadedCovers++;
           } catch (e) {
             report.errors.add('上传《${b.title}》封面失败: $e');
@@ -726,18 +759,37 @@ class SyncEngine {
         continue;
       }
 
-      // 下载：本地没封面、远端有 → 下（并校验 coverHash）
+      // 下载：本地没封面、远端有 → 下（流式 + 增量校验 coverHash）
       try {
         if (!await _remoteHasCover(hash)) continue;
-        final bytes = await client.getBytes(remotePath);
-        final actual = _sha256OfBytes(bytes);
+        final tmp = File(p.join(Directory.systemTemp.path, '$hash.dl'));
+        final sink = tmp.openWrite();
+        final hashSink = sha256.newSink();
+        try {
+          await for (final chunk in client.getBytesStream(remotePath,
+              onProgress: (sent, total) => _emit(
+                SyncPhase.transferring,
+                '下载《${b.title}》封面',
+                total <= 0 ? null : sent / total,
+              ))) {
+            sink.add(chunk);
+            hashSink.add(chunk);
+          }
+          await sink.flush();
+          await sink.close();
+          hashSink.close();
+        } catch (e) {
+          await sink.close().catchError((_) {});
+          await tmp.delete().catchError((_) {});
+          rethrow;
+        }
+        final actual = hashSink.hash.toString();
         if (actual != hash) {
+          await tmp.delete();
           report.errors.add('《${b.title}》封面校验失败，已丢弃');
           continue;
         }
-        final ext = _coverExtForBytes(bytes);
-        final tmp = File(p.join(Directory.systemTemp.path, hash));
-        await tmp.writeAsBytes(bytes, flush: true);
+        final ext = await _coverExtForFile(tmp.path);
         final dest = await covers.importFile(tmp.path, hash, ext);
         await tmp.delete();
         // 回填本地封面路径，书架才能正常显示
@@ -805,9 +857,11 @@ class SyncEngine {
     return '.jpg';
   }
 
-  /// 书籍文件按 sha256 内容寻址。下载后必须校验，不符则丢弃重下。
-  /// 与 Rust 核心 `sha256_file()` 结果一致（都是标准 SHA-256 十六进制）。
-  String _sha256OfBytes(List<int> bytes) => sha256.convert(bytes).toString();
+  /// 流式下载落地后，从临时文件头部魔数推断封面扩展名（封面体积小，仅读首 12 字节）。
+  Future<String> _coverExtForFile(String path) async {
+    final head = await File(path).openRead(0, 12).first;
+    return _coverExtForBytes(head);
+  }
 
   // ══════════════════════ base 快照（三方合并用） ══════════════════════
 

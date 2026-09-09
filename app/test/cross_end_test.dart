@@ -8,6 +8,7 @@
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' show sha256;
 import 'package:drift/drift.dart';
@@ -113,6 +114,23 @@ class MockWebDavClient extends WebDavClient {
     if (etag != null && f != null && f.etag != etag) return false; // 412 冲突
     _store[k] = _MockFile(Uint8List.fromList(body), _newEtag());
     return true;
+  }
+
+  @override
+  Future<void> putAtomicStream(String path, Stream<List<int>> body,
+      {required int contentLength, void Function(int, int)? onProgress}) async {
+    final out = BytesBuilder();
+    await for (final c in body) {
+      out.add(c);
+    }
+    await putAtomic(path, out.takeBytes(), onProgress: onProgress);
+  }
+
+  @override
+  Stream<Uint8List> getBytesStream(String path,
+      {void Function(int, int)? onProgress}) async* {
+    final bytes = await getBytes(path, onProgress: onProgress);
+    yield bytes;
   }
 }
 
