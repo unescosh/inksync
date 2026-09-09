@@ -918,11 +918,11 @@ void main() {
     final rep1 =
         await makeEngine(b, client, 'bbbbbbbb', FakeBlobStore(), FakeCoverStore()).sync();
     expect(rep1.errors, isNotEmpty, reason: '拉取失败应记账');
-    expect(
-      await (b.select(b.books)..where((t) => t.id.equals(bookId))).getSingleOrNull(),
-      isNull,
-      reason: '批次没应用成功，书不该出现',
-    );
+    // 注意：这里不能用 `isNull` / `isNotNull` —— drift 与 matcher 都导出了这两个
+    // 名字，在同一文件里会产生 ambiguous_import。
+    final missing =
+        await (b.select(b.books)..where((t) => t.id.equals(bookId))).getSingleOrNull();
+    expect(missing == null, true, reason: '批次没应用成功，书不该出现');
     // 关键断言：水位线必须仍停在起点（未推进）。
     // 否则下次 h.compareTo(lastApplied) > 0 会把它过滤掉 → 永久丢数据。
     expect(
@@ -937,7 +937,7 @@ void main() {
         await makeEngine(b, client, 'bbbbbbbb', FakeBlobStore(), FakeCoverStore()).sync();
     expect(rep2.errors, isEmpty, reason: '恢复后应无错误');
     final got = await (b.select(b.books)..where((t) => t.id.equals(bookId))).getSingleOrNull();
-    expect(got, isNotNull, reason: '失败的批次必须能重试成功，而不是永久丢失');
+    expect(got != null, true, reason: '失败的批次必须能重试成功，而不是永久丢失');
     expect(got!.title, 'P0 书');
   });
 }
