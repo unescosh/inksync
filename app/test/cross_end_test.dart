@@ -127,7 +127,7 @@ class MockWebDavClient extends WebDavClient {
   }
 
   @override
-  Stream<Uint8List> getBytesStream(String path,
+  Stream<List<int>> getBytesStream(String path,
       {void Function(int, int)? onProgress}) async* {
     final bytes = await getBytes(path, onProgress: onProgress);
     yield bytes;

@@ -183,7 +183,7 @@ class WebDavClient {
   ///
   /// 与 [getBytes] 的区别：不把整份响应攒进一个 [Uint8List]，而是按需吐出分块，
   /// 便于边收边写文件、边算 sha256，把峰值内存从「文件大小」压到「缓冲区大小」。
-  Stream<Uint8List> getBytesStream(
+  Stream<List<int>> getBytesStream(
     String path, {
     void Function(int, int)? onProgress,
   }) async* {
