@@ -530,10 +530,14 @@ class AppDatabase extends _$AppDatabase {
           .watch();
 
   /// 未处理的冲突列表（按时间倒序），同步中心展示用。「绝不静默覆盖」。
-  Stream<List<ConflictRow>> watchConflicts() =>
+  ///
+  /// 必须限制条数：conflict_log 每次冲突裁决都会新增一行，全量 watch 会让同步中心
+  /// 随使用时间越来越卡。已处理的记录由 [purgeDismissedConflicts] 定期回收。
+  Stream<List<ConflictRow>> watchConflicts({int limit = 200}) =>
       (select(conflictLog)
             ..where((t) => t.dismissed.equals(false))
-            ..orderBy([(t) => OrderingTerm.desc(t.createdAt)]))
+            ..orderBy([(t) => OrderingTerm.desc(t.createdAt)])
+            ..limit(limit))
           .watch();
 
   /// 标记某条冲突为已处理（用户已查看/忽略），不再出现在同步中心。
@@ -541,11 +545,29 @@ class AppDatabase extends _$AppDatabase {
       (update(conflictLog)..where((t) => t.id.equals(id)))
           .write(const ConflictLogCompanion(dismissed: Value(true)));
 
+  /// 回收「已处理且超过保留期」的冲突留痕，返回删除条数。
+  ///
+  /// [dismissConflict] 是软删，只翻 `dismissed` 标志；不清的话 conflict_log 会
+  /// 随时间无界增长。保留期内仍可查（便于用户反悔/排查），过期后自动回收。
+  Future<int> purgeDismissedConflicts({int keepDays = 30}) async {
+    final cutoff = DateTime.now().toUtc().subtract(Duration(days: keepDays));
+    return (delete(conflictLog)
+          ..where((t) =>
+              t.dismissed.equals(true) & t.createdAt.isSmallerThanValue(cutoff)))
+        .go();
+  }
+
   /// 待推送的本地变更数（outbox 行数），同步中心显示「还有 N 条待同步」。
-  Stream<int> watchPendingOutboxCount() =>
-      (select(outbox)..orderBy([(t) => OrderingTerm.asc(t.seq)]))
-          .watch()
-          .map((rows) => rows.length);
+  ///
+  /// 用 COUNT(*) 而不是「把整张表 watch 出来再取 length」：outbox 每行都带着完整
+  /// payloadJson，全表 watch 会在**每次** outbox 变动时把所有 payload 反序列化
+  /// 一遍，只为拿一个数字（同步中心是常驻监听，放大得很明显）。
+  Stream<int> watchPendingOutboxCount() {
+    final n = countAll();
+    return (selectOnly(outbox)..addColumns([n]))
+        .map((row) => row.read(n) ?? 0)
+        .watchSingle();
+  }
 
   /// 删除批注：墓碑软删（与书籍一致，离线端同步后也删），并写 outbox。
   Future<void> tombstoneAnnotation({

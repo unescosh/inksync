@@ -940,4 +940,33 @@ void main() {
     expect(got != null, true, reason: '失败的批次必须能重试成功，而不是永久丢失');
     expect(got!.title, 'P0 书');
   });
+
+  test('P1: outbox 超过单批上限时分块推送（不拼成一个巨型批次）', () async {
+    // 旧实现把所有待推记录拼成**一个**无大小上限的 jsonl：离线久了可能几千条，
+    // 一次网络抖动整批失败、整批重来。现在按 _outboxChunkSize(200) 拆批。
+    final a = AppDatabase.forTesting(NativeDatabase.memory());
+    final client = MockWebDavClient();
+
+    for (var i = 0; i < 250; i++) {
+      await enqueueRaw(a, 'book', 'b$i', 'upsert', {
+        'id': 'b$i',
+        'title': 'T$i',
+        'hlc': '0001',
+        'updatedBy': 'aaaaaaaa',
+      }, '0001');
+    }
+
+    final rep =
+        await makeEngine(a, client, 'aaaaaaaa', FakeBlobStore(), FakeCoverStore()).sync();
+    expect(rep.errors, isEmpty, reason: '分块推送不应产生错误');
+
+    // 250 条 > 200 上限 → 应拆成多个 changes 批次文件
+    final batchFiles = (await client.propfind('inksync/changes/', depth: 1))
+        .where((e) => !e.isDir && e.name.endsWith('.jsonl'))
+        .toList();
+    expect(batchFiles.length, greaterThan(1), reason: '应拆成多个批次而非一个巨型文件');
+
+    // 全部分块推完 → outbox 清空（同时覆盖 watchPendingOutboxCount 的 COUNT 实现）
+    expect(await a.watchPendingOutboxCount().first, 0, reason: '推完应清空 outbox');
+  });
 }

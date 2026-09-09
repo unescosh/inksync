@@ -130,7 +130,7 @@ class _StatusCard extends StatelessWidget {
                 data: (v) => v,
               ),
             ),
-            _Row(label: '待同步变更', value: '$pending 条'),
+            _Row(label: '待备份改动', value: '$pending 条'),
             _Row(
               label: '上次同步',
               value: lastSync.when(
@@ -149,10 +149,71 @@ class _StatusCard extends StatelessWidget {
                     ?.copyWith(color: scheme.onSurfaceVariant),
               ),
             ],
+            // 失败必须让用户看见：同步中心是排查同步问题的第一入口，
+            // 而原来只有 r.ok 为真才显示结果 —— 失败时整块空白（错误只出现在设置页）。
+            if (r != null && r.errors.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Icon(Icons.error_outline, size: 16, color: scheme.error),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      '本次同步遇到 ${r.errors.length} 个问题',
+                      style: TextStyle(
+                        color: scheme.error,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              ...r.errors.take(5).map(
+                    (e) => Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        '• ${_humanizeError(e)}',
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(color: scheme.error),
+                      ),
+                    ),
+                  ),
+              if (r.errors.length > 5) ...[
+                const SizedBox(height: 4),
+                Text(
+                  '……另有 ${r.errors.length - 5} 条，可在设置页查看完整列表',
+                  style: Theme.of(context)
+                      .textTheme
+                      .bodySmall
+                      ?.copyWith(color: scheme.onSurfaceVariant),
+                ),
+              ],
+            ],
           ],
         ),
       ),
     );
+  }
+
+  /// 把底层错误翻译成人话：不要直接给用户看 "HTTP 401 Unauthorized" 这类原文。
+  /// 只做提示性补充，原始信息仍然保留，便于排查。
+  static String _humanizeError(String e) {
+    if (e.contains('401')) return '$e（通常是用户名或密码不对）';
+    if (e.contains('403')) return '$e（账号没有写入权限）';
+    if (e.contains('404')) return '$e（服务器地址或路径可能填错了）';
+    if (e.contains('409')) return '$e（远端目录冲突，稍后重试即可）';
+    if (e.contains('412')) return '$e（与另一端同时写入，已自动重试）';
+    if (e.contains('423')) return '$e（资源被锁定，稍后重试）';
+    if (e.contains('SocketException') || e.contains('TimeoutException')) {
+      return '$e（连不上服务器，请检查网络与地址）';
+    }
+    if (e.contains('Certificate') || e.contains('Handshake')) {
+      return '$e（证书不受信任；自签名服务器请在设置里开启「信任无效证书」）';
+    }
+    return e;
   }
 
   static String _formatTime(String iso) {

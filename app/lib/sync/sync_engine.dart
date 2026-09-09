@@ -207,6 +207,11 @@ class SyncEngine {
 
   static const int _maxManifestRetries = 5;
 
+  /// 单次推送的 outbox 记录上限（超过就拆成多个 changes 批次文件）。
+  /// 太大 → 单个巨型文件，一次网络抖动整批重来；太小 → 批次文件数量膨胀，
+  /// 每次轮询要列/下载更多文件。200 条是这两者的折中。
+  static const int _outboxChunkSize = 200;
+
   String get _changesPath => '$remoteRoot/changes';
   String get _manifestPath => '$remoteRoot/manifest.json';
   String get _blobsPath => '$remoteRoot/blobs';
@@ -239,6 +244,13 @@ class SyncEngine {
         _emit(SyncPhase.error, e.toString());
         break;
       }
+    }
+    // 保养：回收「已处理且过期」的冲突留痕。conflict_log 是软删（dismissed），
+    // 不定时清会随时间无界增长。纯维护操作，失败不该影响本轮同步结果，故吞掉。
+    try {
+      await db.purgeDismissedConflicts();
+    } catch (_) {
+      // 忽略：下次同步会再试
     }
     return report;
   }
@@ -574,27 +586,33 @@ class SyncEngine {
     final rows = await db.pendingOutbox();
     if (rows.isEmpty) return 0;
 
-    final hlc = clock.tick();
-    final buf = StringBuffer();
-    for (final r in rows) {
-      buf.writeln(
-        jsonEncode({
-          't': r.entityType,
-          'id': r.entityId,
-          'op': r.op,
-          'hlc': r.hlc,
-          'node': deviceId,
-          if (r.op == 'upsert' || r.op == 'delete') 'd': jsonDecode(r.payloadJson),
-        }),
-      );
+    // 分块推送：原先把所有待推记录拼成**一个** jsonl（无大小上限），离线久了可能
+    // 几千条几十 MB —— 一次网络抖动就整批失败、整批重来。分块后每块独立推进，
+    // 某块失败只重试它自己（前面已成功的块已从 outbox 清掉，不会重复推）。
+    var pushed = 0;
+    for (var i = 0; i < rows.length; i += _outboxChunkSize) {
+      final chunk =
+          rows.sublist(i, math.min(i + _outboxChunkSize, rows.length));
+      final hlc = clock.tick(); // 每块一个新 HLC，保证文件名递增且唯一
+      final buf = StringBuffer();
+      for (final r in chunk) {
+        buf.writeln(
+          jsonEncode({
+            't': r.entityType,
+            'id': r.entityId,
+            'op': r.op,
+            'hlc': r.hlc,
+            'node': deviceId,
+            if (r.op == 'upsert' || r.op == 'delete') 'd': jsonDecode(r.payloadJson),
+          }),
+        );
+      }
+      final fileName = '$_changesPath/${hlc.encode()}.jsonl';
+      await client.putAtomic(fileName, utf8.encode(buf.toString()));
+      await db.clearOutboxUpTo(chunk.last.seq);
+      pushed += chunk.length;
     }
-    final fileName = '$_changesPath/${hlc.encode()}.jsonl';
-    await client.putAtomic(fileName, utf8.encode(buf.toString()));
-
-    if (rows.isNotEmpty) {
-      await db.clearOutboxUpTo(rows.last.seq);
-    }
-    return rows.length;
+    return pushed;
   }
 
   /// [appliedThrough] 是本端「已成功应用到」的水位线（由 `_syncOnce` 算出）。
