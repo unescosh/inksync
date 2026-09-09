@@ -1,0 +1,141 @@
+# 09 · 无头 CLI 使用指南（UOS / 服务器 / CI 备份）
+
+`core/examples/cli_backup.rs` 是一个**不依赖 Flutter 引擎**的 Rust 入口，用来把本地书目录 +
+封面目录按内容寻址备份到 WebDAV（或反向拉回）。本文档面向运维 / 自托管用户，讲清楚怎么编译、
+配置、跑、以及怎么排期成定时备份。
+
+> 它复用的传输逻辑与 App 内 Dart `SyncEngine` 完全一致（`core/src/sync/transfer.rs`）：内容寻址、
+> sha256 校验、幂等、免冲突。所以 CLI 备份出来的远端布局（`blobs/<sha[:2]>/<sha>`、
+> `covers/<hash[:2]>/<hash>`）与手机/桌面端互通。
+
+## 1. 编译
+
+CLI 需要联网（要 `WebDavClient`），因此门控在 `sync` feature，编译机需带完整 mingw
+（Windows 上需 `gcc.exe`/`as.exe`；UOS 20 用系统 `gcc` + `pkg-config` 即可）：
+
+```bash
+cd inksync/core
+cargo build --release --features sync --example cli_backup
+# 产物：target/release/examples/cli_backup
+```
+
+> 沙箱 / CI 的 Rust job 跑默认 features（不编 `sync`），故 CLI 二进制不在 CI 编译范围内；
+> 其底层传输逻辑由 `core/src/sync/transfer.rs` 的 `cli_scan_pair_and_transfer` 等内存单测在
+> 默认 features 下覆盖，`.env` 解析由 `core/src/cli.rs` 单测覆盖。
+
+## 2. 配置文件（推荐，避免命令行明文密码）
+
+建一个 `inksync.env`（权限设 `600`）：
+
+```text
+INKSYNC_URL=https://dav.example.com/inksync/
+INKSYNC_USER=alice
+INKSYNC_PASS=secret
+INKSYNC_BOOKS=/srv/inksync/books
+INKSYNC_COVERS=/srv/inksync/covers
+INKSYNC_STORE=/srv/inksync/store
+# INKSYNC_REMOTE=inksync   # 可选，默认 inksync
+```
+
+命令行参数优先级高于配置文件；两者可混用（例如配置文件给凭据、命令行临时覆盖目录）。
+
+## 3. 用法
+
+```bash
+# 先试跑：只打印将要上传的书/封面（含 sha256/coverHash），不碰远端
+./cli_backup push --config ./inksync.env --dry-run
+
+# 正式推送（本地书+封面 → 远端；本地有远端缺才传，幂等）
+./cli_backup push --config ./inksync.env
+
+# 把远端有、本地仓库缺的拉回本地 store（用于换机/恢复）
+./cli_backup pull --config ./inksync.env
+
+# 不带配置、全命令行（不推荐，密码会进 shell 历史）
+./cli_backup push \
+    --books /srv/inksync/books --covers /srv/inksync/covers \
+    --store /srv/inksync/store \
+    --url https://dav.example.com/inksync/ --user alice --pass secret
+```
+
+### 目录与产物
+- `--books` / `--covers`：待备份的源目录（递归扫描，书名=文件名去扩展名）。
+- `--store`：本地仓库根。推送后写入：
+  - `store/blobs/<sha[:2]>/<sha>`：书籍原文件（内容寻址）；
+  - `store/covers/<hash>.<ext>`：封面（扩展名按魔数）；
+  - `store/book_index.json`：人类可读清单（sha256/coverHash 映射回书名），便于核对"备份了哪些书"。
+- 远端：与 App 共用的 `inksync/blobs/...`、`inksync/covers/...`。
+
+`book_index.json` 示例：
+
+```json
+{
+  "entries": [
+    { "title": "我的漫画", "sha256": "ab12…", "cover_hash": "cd34…" }
+  ]
+}
+```
+
+## 4. 排期成定时备份（UOS / Linux）
+
+### 4.1 systemd 定时器（推荐服务器常驻）
+
+`/etc/systemd/system/inksync-backup.service`：
+
+```ini
+[Unit]
+Description=inksync headless backup to WebDAV
+
+[Service]
+Type=oneshot
+User=inksync
+# 假设二进制与 inksync.env 放在 /opt/inksync/
+ExecStart=/opt/inksync/cli_backup push --config /opt/inksync/inksync.env
+# 失败才告警，不影响定时
+```
+
+`/etc/systemd/system/inksync-backup.timer`：
+
+```ini
+[Unit]
+Description=Daily inksync backup
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+RandomizedDelaySec=900
+
+[Install]
+WantedBy=timers.target
+```
+
+启用：
+
+```bash
+systemctl daemon-reload
+systemctl enable --now inksync-backup.timer
+systemctl status inksync-backup.timer
+# 手动跑一次看效果：
+systemctl start inksync-backup.service
+journalctl -u inksync-backup.service -e
+```
+
+### 4.2 cron（无 systemd 的旧环境）
+
+```cron
+# 每天 03:07 跑，输出进日志
+7 3 * * *  /opt/inksync/cli_backup push --config /opt/inksync/inksync.env >> /var/log/inksync-backup.log 2>&1
+```
+
+## 5. 容错与幂等
+- 单次失败不中断整轮：某本书传输报错只记进 `SyncReport.errors` 并继续下一本；退出码非零且
+   stderr 打印错误清单，便于定时任务监控。
+- 幂等：远端已有则跳过，可放心高频/重复跑；内容变了（sha256 不同）才会重新传。
+- 校验：从远端下载的书/封面都做 sha256 校验，不符即丢弃，绝不写坏本地文件。
+- 自签名证书：加 `--accept-invalid-certs`（仅测试/内网自签服务端用）。
+
+## 6. 与 App 的关系
+- CLI 只动**书籍原文件 + 封面字节**（`blobs/` `covers/`），与 App 的 `changes/` 元数据同步互不冲突；
+  两者可并存。App 负责进度/分组/高亮等元数据的三方合并，CLI 负责大二进制的无头备份/恢复。
+- 恢复场景：新机器上 `pull` 把 `blobs/` `covers/` 拉回 `--store`，App 首次同步元数据后按
+  `coverHash`/`sha256` 从本地 store 找到字节，无需重新从网络拉整本。
