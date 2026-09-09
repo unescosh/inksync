@@ -138,10 +138,11 @@ class _StatusCard extends StatelessWidget {
                 data: (v) => v == null ? '尚未同步' : _formatTime(v),
               ),
             ),
-            if (report != null && report.ok) ...[
+            final r = report;
+            if (r != null && r.ok) ...[
               const SizedBox(height: 8),
               Text(
-                '上次结果：推送 ${report.pushedChanges} / 拉取 ${report.pulledChanges} / 冲突 ${report.conflicts}',
+                '上次结果：推送 ${r.pushedChanges} / 拉取 ${r.pulledChanges} / 冲突 ${r.conflicts}',
                 style: Theme.of(context)
                     .textTheme
                     .bodySmall
