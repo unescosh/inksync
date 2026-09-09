@@ -401,6 +401,28 @@ class WebDavClient {
 
   // ─────────────── 退避重试 ───────────────
 
+  /// 哪些 HTTP 状态码值得重试（可恢复的瞬时服务端错误）。
+  /// 4xx（401/403/404/405/409/412…）重试没有意义，直接抛出。
+  static bool isRetryableStatus(int status) =>
+      status >= 500 || status == 429 || status == 423;
+
+  /// 哪些 Dio 异常类型值得重试（网络层 / 超时 / 连接错误）。
+  /// cancel / badResponse / badCertificate 不可重试。
+  static bool isRetryableDioType(DioExceptionType type) =>
+      type == DioExceptionType.connectionTimeout ||
+      type == DioExceptionType.receiveTimeout ||
+      type == DioExceptionType.sendTimeout ||
+      type == DioExceptionType.connectionError ||
+      type == DioExceptionType.unknown;
+
+  /// 指数退避 + 抖动：基础 300ms × 2^attempt，加 [0,250)ms 抖动，整体上限 8s。
+  /// [rng] 可注入以便测试得到确定结果。
+  static Duration backoffDelay(int attempt, [math.Random? rng]) {
+    final base = (300 * math.pow(2, attempt)).toInt();
+    final jitter = (rng ?? math.Random()).nextInt(250);
+    return Duration(milliseconds: (base + jitter).clamp(0, 8000));
+  }
+
   /// 只对"可恢复"错误重试：网络层异常、5xx、429、423(LOCKED)。
   /// 4xx（401/403/404/405...）重试没有意义，直接抛出。
   Future<Response<T>> _do<T>(
@@ -420,21 +442,12 @@ class WebDavClient {
           final resp = e.response;
           if (resp != null) return resp as Response<T>;
         }
-        final retryable =
-            e.type == DioExceptionType.connectionTimeout ||
-            e.type == DioExceptionType.receiveTimeout ||
-            e.type == DioExceptionType.sendTimeout ||
-            e.type == DioExceptionType.connectionError ||
-            e.type == DioExceptionType.unknown ||
-            status >= 500 ||
-            status == 429 ||
-            status == 423;
+        final retryable = isRetryableStatus(status) || isRetryableDioType(e.type);
         if (!retryable || i == attempts - 1) {
           lastError = WebDavException(status, e.message ?? e.type.name);
           break;
         }
-        final delayMs = (300 * math.pow(2, i)).toInt() + _rng.nextInt(250);
-        await Future<void>.delayed(Duration(milliseconds: delayMs.clamp(0, 8000)));
+        await Future<void>.delayed(backoffDelay(i, _rng));
         lastError = e;
       }
     }
