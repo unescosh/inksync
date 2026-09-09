@@ -654,7 +654,7 @@ class AppDatabase extends _$AppDatabase {
           case 'addedAt':
             await w.write(BooksCompanion(addedAt: Value(_asDateTime(adopted) ?? now), hlc: h, updatedBy: u, updatedAt: at));
           case 'updatedAt':
-            await w.write(BooksCompanion(updatedAt: Value(_asDateTime(adopted) ?? now), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(BooksCompanion(updatedAt: Value(_asDateTime(adopted) ?? now), hlc: h, updatedBy: u));
           case 'deleted':
             await w.write(BooksCompanion(deleted: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
         }
@@ -674,65 +674,65 @@ class AppDatabase extends _$AppDatabase {
           case 'forced':
             await w.write(ProgressesCompanion(forced: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
           case 'updatedAt':
-            await w.write(ProgressesCompanion(updatedAt: Value(_asDateTime(adopted) ?? now), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(ProgressesCompanion(updatedAt: Value(_asDateTime(adopted) ?? now), hlc: h, updatedBy: u));
         }
       case 'rule':
         final w = update(rules)..where((t) => t.id.equals(entityId));
         switch (field) {
           case 'name':
-            await w.write(RulesCompanion(name: Value(_asStr(adopted) ?? ''), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(RulesCompanion(name: Value(_asStr(adopted) ?? ''), hlc: h, updatedBy: u));
           case 'kind':
-            await w.write(RulesCompanion(kind: Value(_asStr(adopted) ?? 'regex'), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(RulesCompanion(kind: Value(_asStr(adopted) ?? 'regex'), hlc: h, updatedBy: u));
           case 'pattern':
-            await w.write(RulesCompanion(pattern: Value(_asStr(adopted) ?? ''), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(RulesCompanion(pattern: Value(_asStr(adopted) ?? ''), hlc: h, updatedBy: u));
           case 'caseSensitive':
-            await w.write(RulesCompanion(caseSensitive: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(RulesCompanion(caseSensitive: Value(_asBool(adopted)), hlc: h, updatedBy: u));
           case 'colorValue':
-            await w.write(RulesCompanion(colorValue: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(RulesCompanion(colorValue: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u));
           case 'bgColorValue':
-            await w.write(RulesCompanion(bgColorValue: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(RulesCompanion(bgColorValue: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u));
           case 'bgOpacity':
-            await w.write(RulesCompanion(bgOpacity: Value(_asDouble(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(RulesCompanion(bgOpacity: Value(_asDouble(adopted) ?? 0), hlc: h, updatedBy: u));
           case 'bold':
-            await w.write(RulesCompanion(bold: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(RulesCompanion(bold: Value(_asBool(adopted)), hlc: h, updatedBy: u));
           case 'italic':
-            await w.write(RulesCompanion(italic: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(RulesCompanion(italic: Value(_asBool(adopted)), hlc: h, updatedBy: u));
           case 'underline':
-            await w.write(RulesCompanion(underline: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(RulesCompanion(underline: Value(_asBool(adopted)), hlc: h, updatedBy: u));
           case 'priority':
-            await w.write(RulesCompanion(priority: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(RulesCompanion(priority: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u));
           case 'scopeCsv':
-            await w.write(RulesCompanion(scopeCsv: Value(_asStr(adopted) ?? 'novel'), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(RulesCompanion(scopeCsv: Value(_asStr(adopted) ?? 'novel'), hlc: h, updatedBy: u));
           case 'enabled':
-            await w.write(RulesCompanion(enabled: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(RulesCompanion(enabled: Value(_asBool(adopted)), hlc: h, updatedBy: u));
           case 'sortOrder':
-            await w.write(RulesCompanion(sortOrder: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(RulesCompanion(sortOrder: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u));
           case 'updatedAt':
-            await w.write(RulesCompanion(updatedAt: Value(_asDateTime(adopted) ?? now), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(RulesCompanion(hlc: h, updatedBy: u));
           case 'deleted':
-            await w.write(RulesCompanion(deleted: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(RulesCompanion(deleted: Value(_asBool(adopted)), hlc: h, updatedBy: u));
         }
       case 'collection':
         final w = update(collections)..where((t) => t.id.equals(entityId));
         switch (field) {
           case 'name':
-            await w.write(CollectionsCompanion(name: Value(_asStr(adopted) ?? ''), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(CollectionsCompanion(name: Value(_asStr(adopted) ?? ''), hlc: h, updatedBy: u));
           case 'sortOrder':
-            await w.write(CollectionsCompanion(sortOrder: Value(_asInt(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(CollectionsCompanion(sortOrder: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u));
           case 'colorValue':
-            await w.write(CollectionsCompanion(colorValue: Value(_asInt(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(CollectionsCompanion(colorValue: Value(_asInt(adopted)), hlc: h, updatedBy: u));
           case 'emoji':
-            await w.write(CollectionsCompanion(emoji: Value(_asStr(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(CollectionsCompanion(emoji: Value(_asStr(adopted)), hlc: h, updatedBy: u));
           case 'deleted':
-            await w.write(CollectionsCompanion(deleted: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(CollectionsCompanion(deleted: Value(_asBool(adopted)), hlc: h, updatedBy: u));
         }
       case 'membership':
         final w = update(memberships)..where((t) => t.id.equals(entityId));
         switch (field) {
           case 'sortOrder':
-            await w.write(MembershipsCompanion(sortOrder: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(MembershipsCompanion(sortOrder: Value(_asInt(adopted) ?? 0), hlc: h, updatedBy: u));
           case 'removed':
-            await w.write(MembershipsCompanion(removed: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(MembershipsCompanion(removed: Value(_asBool(adopted)), hlc: h, updatedBy: u));
         }
       case 'annotation':
         final w = update(annotations)..where((t) => t.id.equals(entityId));
@@ -748,7 +748,7 @@ class AppDatabase extends _$AppDatabase {
           case 'createdAt':
             await w.write(AnnotationsCompanion(createdAt: Value(_asDateTime(adopted) ?? now), hlc: h, updatedBy: u, updatedAt: at));
           case 'updatedAt':
-            await w.write(AnnotationsCompanion(updatedAt: Value(_asDateTime(adopted) ?? now), hlc: h, updatedBy: u, updatedAt: at));
+            await w.write(AnnotationsCompanion(updatedAt: Value(_asDateTime(adopted) ?? now), hlc: h, updatedBy: u));
           case 'deleted':
             await w.write(AnnotationsCompanion(deleted: Value(_asBool(adopted)), hlc: h, updatedBy: u, updatedAt: at));
         }
