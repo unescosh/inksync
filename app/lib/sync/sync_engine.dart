@@ -675,32 +675,34 @@ class SyncEngine {
         continue;
       }
 
-      // 下载：本地没文件、远端有 → 下（流式 + 增量校验 sha256，避免整文件进内存）
+      // 下载：本地没文件、远端有 → 下（流式落盘 + 增量校验 sha256，避免整文件进内存）
       try {
         final exists = await _remoteHasBlob(b.sha256);
         if (!exists) continue;
         final tmp = File(p.join(Directory.systemTemp.path, '${b.sha256}.dl'));
         final sink = tmp.openWrite();
-        final hashSink = sha256.newSink();
         try {
-          await for (final chunk in client.getBytesStream(remotePath,
-              onProgress: (sent, total) => _emit(
-                SyncPhase.transferring,
-                '下载《${b.title}》',
-                total <= 0 ? null : sent / total,
-              ))) {
-            sink.add(chunk);
-            hashSink.add(chunk);
-          }
-          await sink.flush();
-          await sink.close();
-          hashSink.close();
+          await client
+              .getBytesStream(
+                remotePath,
+                onProgress: (sent, total) => _emit(
+                  SyncPhase.transferring,
+                  '下载《${b.title}》',
+                  total <= 0 ? null : sent / total,
+                ),
+              )
+              .pipe(sink);
         } catch (e) {
-          await sink.close().catchError((_) {});
-          await tmp.delete().catchError((_) {});
+          try {
+            await sink.close();
+          } catch (_) {}
+          try {
+            await tmp.delete();
+          } catch (_) {}
           rethrow;
         }
-        final actual = hashSink.hash.toString();
+        // sink 已由 pipe 关闭；流式回读校验 sha256（不整文件进内存）
+        final actual = (await sha256.bind(tmp.openRead()).first).toString();
         if (actual != b.sha256) {
           await tmp.delete();
           report.errors.add('《${b.title}》校验失败，已丢弃');
@@ -759,31 +761,33 @@ class SyncEngine {
         continue;
       }
 
-      // 下载：本地没封面、远端有 → 下（流式 + 增量校验 coverHash）
+      // 下载：本地没封面、远端有 → 下（流式落盘 + 增量校验 coverHash）
       try {
         if (!await _remoteHasCover(hash)) continue;
         final tmp = File(p.join(Directory.systemTemp.path, '$hash.dl'));
         final sink = tmp.openWrite();
-        final hashSink = sha256.newSink();
         try {
-          await for (final chunk in client.getBytesStream(remotePath,
-              onProgress: (sent, total) => _emit(
-                SyncPhase.transferring,
-                '下载《${b.title}》封面',
-                total <= 0 ? null : sent / total,
-              ))) {
-            sink.add(chunk);
-            hashSink.add(chunk);
-          }
-          await sink.flush();
-          await sink.close();
-          hashSink.close();
+          await client
+              .getBytesStream(
+                remotePath,
+                onProgress: (sent, total) => _emit(
+                  SyncPhase.transferring,
+                  '下载《${b.title}》封面',
+                  total <= 0 ? null : sent / total,
+                ),
+              )
+              .pipe(sink);
         } catch (e) {
-          await sink.close().catchError((_) {});
-          await tmp.delete().catchError((_) {});
+          try {
+            await sink.close();
+          } catch (_) {}
+          try {
+            await tmp.delete();
+          } catch (_) {}
           rethrow;
         }
-        final actual = hashSink.hash.toString();
+        // sink 已由 pipe 关闭；流式回读校验 coverHash（不整文件进内存）
+        final actual = (await sha256.bind(tmp.openRead()).first).toString();
         if (actual != hash) {
           await tmp.delete();
           report.errors.add('《${b.title}》封面校验失败，已丢弃');
