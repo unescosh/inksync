@@ -36,6 +36,10 @@ class MockWebDavClient extends WebDavClient {
 
   final Map<String, _MockFile> _store = {};
   int _seq = 0;
+  // P1 回归计数：断言传输走的是**流式**方法（putAtomicStream/getBytesStream），
+  // 而非旧的"整文件进内存"路径（putAtomic/getBytes）。
+  int streamPutCount = 0;
+  int streamGetCount = 0;
   String _newEtag() => '"mock-${(++_seq).toRadixString(36)}"';
 
   String _norm(String path) {
@@ -119,6 +123,7 @@ class MockWebDavClient extends WebDavClient {
   @override
   Future<void> putAtomicStream(String path, Stream<List<int>> body,
       {required int contentLength, void Function(int, int)? onProgress}) async {
+    streamPutCount++;
     final out = BytesBuilder();
     await for (final c in body) {
       out.add(c);
@@ -129,6 +134,7 @@ class MockWebDavClient extends WebDavClient {
   @override
   Stream<List<int>> getBytesStream(String path,
       {void Function(int, int)? onProgress}) async* {
+    streamGetCount++;
     final bytes = await getBytes(path, onProgress: onProgress);
     yield bytes;
   }
@@ -169,6 +175,28 @@ class _SeededBlobStore extends BlobStore {
   Future<String?> pathFor(String sha256) async => files[sha256];
   @override
   Future<String> importFile(String sourcePath, String sha256) async => sourcePath;
+}
+
+/// 下载仓库的内存版：把落地的书文件**拷**到临时目录并记账 sha256→路径
+/// （与 FakeCoverStore 镜像，区别在 key 是 sha256 而非 coverHash）。
+/// 关键点：importFile 做拷贝，使引擎在 `tmp.delete()` 之后副本仍可读，
+/// 从而能在测试里断言"下载的书文件字节与原书一致"。
+class _CopyingBlobStore extends BlobStore {
+  _CopyingBlobStore([String? dir])
+      : _dir = dir ?? Directory.systemTemp.createTempSync('blob-copy-').path;
+  final String _dir;
+  final Map<String, String> files = {}; // sha256 → 本地路径
+
+  @override
+  Future<String?> pathFor(String sha256) async => files[sha256];
+
+  @override
+  Future<String> importFile(String sourcePath, String sha256) async {
+    final dest = p.join(_dir, sha256);
+    await File(sourcePath).copy(dest);
+    files[sha256] = dest;
+    return dest;
+  }
 }
 
 /// 封面仓库的内存版：把文件拷到临时目录并记账 hash→路径，便于断言"封面已落地"。
@@ -987,4 +1015,161 @@ void main() {
     // 全部分块推完 → outbox 清空（同时覆盖 watchPendingOutboxCount 的 COUNT 实现）
     expect(await a.watchPendingOutboxCount().first, 0, reason: '推完应清空 outbox');
   });
+
+  test('P1: 书文件流式上传→下载真实字节往返（sha256 一致，走流式路径）', () async {
+    // 补齐 docs/08 T19 的运行时覆盖缺口：此前所有书的 sha256 都为空，
+    // `_transferBlobs` 在 `if (b.sha256.isEmpty) continue;` 就跳过了，
+    // 流式上传(putAtomicStream)/下载(getBytesStream)只在**编译+类型层**被覆盖，
+    // 从没跑过真实字节。本用例用真实落盘的书文件跑一遍完整往返。
+    //
+    // 关键断言：
+    //  · uploadedBooks / downloadedBooks 计数正确（引擎编排层）；
+    //  · streamPutCount / streamGetCount == 1（证明走的是**流式**方法，而非旧
+    //    的"整文件进内存" putAtomic/getBytes）；
+    //  · B 端落地的书文件字节与原书 sha256 一致（流式落盘+增量校验无损坏）。
+    TestWidgetsFlutterBinding.ensureInitialized();
+
+    final a = AppDatabase.forTesting(NativeDatabase.memory());
+    final b = AppDatabase.forTesting(NativeDatabase.memory());
+    final client = MockWebDavClient();
+
+    // 造一本"真书"：PK 头 + 一段有辨识度的填充字节（约 50KB，足以让 Dio 分块，
+    // 但不至于拖慢测试）。sha256 即内容寻址键。
+    final bookBytes = Uint8List.fromList([
+      0x50, 0x4B, 0x03, 0x04,
+      ...List.generate(50000, (i) => (i * 31 + 7) & 0xFF),
+    ]);
+    final bookSha = sha256.convert(bookBytes).toString();
+
+    // A 端：把书文件真实落盘，并在 books 表填 sha256 + localPath（本地有文件 → 上传）
+    final aBlobDir = await Directory.systemTemp.createTemp('blob-a-');
+    final aBookFile = File(p.join(aBlobDir.path, bookSha));
+    await aBookFile.writeAsBytes(bookBytes, flush: true);
+
+    const bookId = 'book-stream';
+    final h = Hlc(wallMs: 1000, counter: 0, node: 'aaaaaaaa');
+    await a.into(a.books).insert(BooksCompanion.insert(
+      id: bookId,
+      sha256: bookSha,
+      format: 'epub',
+      title: '流式传输的书',
+      localPath: Value(aBookFile.path), // 本地文件存在 → _transferBlobs 走上传
+      addedAt: DateTime.parse(_t),
+      updatedAt: DateTime.parse(_t),
+      hlc: h.encode(),
+      updatedBy: 'aaaaaaaa',
+    ));
+    // 注意：outbox payload **不带** localPath（localPath 是设备私有缓存列，
+    // 不应跨端同步），否则 B 会误以为自己也有这份文件、跳过下载分支。
+    await enqueueRaw(a, 'book', bookId, 'upsert', {
+      'id': bookId,
+      'sha256': bookSha,
+      'format': 'epub',
+      'title': '流式传输的书',
+      'hlc': h.encode(),
+      'updatedBy': 'aaaaaaaa',
+    }, h.encode());
+
+    // A 推（流式上传书文件）→ B 拉（流式下载书文件）
+    final repA = await makeEngine(a, client, 'aaaaaaaa', FakeBlobStore()).sync();
+    expect(repA.ok, isTrue, reason: 'A 端同步不应失败: ${repA.errors}');
+    expect(repA.uploadedBooks, 1, reason: 'A 应流式上传 1 本书');
+    expect(client.streamPutCount, 1, reason: 'P1: 上传必须走 putAtomicStream（流式）');
+
+    final bStore = _CopyingBlobStore();
+    final repB = await makeEngine(b, client, 'bbbbbbbb', bStore).sync();
+    expect(repB.ok, isTrue, reason: 'B 端同步不应失败: ${repB.errors}');
+    expect(repB.downloadedBooks, 1, reason: 'B 应流式下载 1 本书');
+    expect(client.streamGetCount, 1, reason: 'P1: 下载必须走 getBytesStream（流式）');
+
+    // B 端：localPath 被回填，且落地的书文件字节与 A 原书一致（sha256 一致）
+    final bBook = await (b.select(b.books)..where((t) => t.id.equals(bookId))).getSingle();
+    expect(bBook.localPath, isNotEmpty, reason: 'B 端 localPath 应被回填');
+    final landed = await File(bBook.localPath!).readAsBytes();
+    expect(sha256.convert(landed).toString(), bookSha,
+        reason: 'B 端书文件 sha256 应与原书一致（流式落盘+增量校验无损坏）');
+
+    // 幂等：远端已有 blob，第二次同步不再重复上传/下载（覆盖"已存在即秒传跳过"）
+    final repA2 = await makeEngine(a, client, 'aaaaaaaa', FakeBlobStore()).sync();
+    final repB2 = await makeEngine(b, client, 'bbbbbbbb', bStore).sync();
+    expect(repA2.uploadedBooks, 0, reason: '幂等：A 不应重复上传');
+    expect(repB2.downloadedBooks, 0, reason: '幂等：B 不应重复下载');
+
+    await a.close();
+    await b.close();
+  });
+
+  test('P1: 校验失败的书文件被丢弃（sha256 不符不上岸、不回填 localPath）', () async {
+    // 反例回归：万一远端 blob 字节损坏（与元数据里的 sha256 不符），引擎必须
+    // 丢弃临时文件、不回填 localPath、并在 report.errors 记账，而不是把坏文件
+    // 当成好书落库。这里用 mock 的"下载钩子"注入损坏字节来触发。
+    TestWidgetsFlutterBinding.ensureInitialized();
+
+    final a = AppDatabase.forTesting(NativeDatabase.memory());
+    final b = AppDatabase.forTesting(NativeDatabase.memory());
+
+    // 用带"下载篡改"钩子的客户端：getBytesStream 吐出与原图不同的字节
+    final corrupt = _CorruptingWebDavClient();
+
+    // A 端放一本真实书并推上去（远端存的是好字节）
+    final goodBytes = Uint8List.fromList([
+      0x50, 0x4B, 0x03, 0x04,
+      ...List.generate(8000, (i) => (i * 13 + 3) & 0xFF),
+    ]);
+    final goodSha = sha256.convert(goodBytes).toString();
+    final aDir = await Directory.systemTemp.createTemp('blob-corrupt-a-');
+    final aFile = File(p.join(aDir.path, goodSha));
+    await aFile.writeAsBytes(goodBytes, flush: true);
+    const bookId = 'book-badsha';
+    final h = Hlc(wallMs: 1000, counter: 0, node: 'aaaaaaaa');
+    await a.into(a.books).insert(BooksCompanion.insert(
+      id: bookId,
+      sha256: goodSha,
+      format: 'epub',
+      title: '会被篡改的书',
+      localPath: Value(aFile.path),
+      addedAt: DateTime.parse(_t),
+      updatedAt: DateTime.parse(_t),
+      hlc: h.encode(),
+      updatedBy: 'aaaaaaaa',
+    ));
+    await enqueueRaw(a, 'book', bookId, 'upsert', {
+      'id': bookId,
+      'sha256': goodSha,
+      'format': 'epub',
+      'title': '会被篡改的书',
+      'hlc': h.encode(),
+      'updatedBy': 'aaaaaaaa',
+    }, h.encode());
+    final repA = await makeEngine(a, corrupt, 'aaaaaaaa', FakeBlobStore()).sync();
+    expect(repA.ok, isTrue, reason: 'A 上传不应失败: ${repA.errors}');
+
+    // B 端拉取，但下载被钩子篡改 → sha256 不符
+    final bStore = _CopyingBlobStore();
+    final repB = await makeEngine(b, client, 'bbbbbbbb', bStore).sync();
+    expect(repB.downloadedBooks, 0, reason: '校验失败的字节不应算"已下载"');
+    expect(repB.errors, isNotEmpty, reason: 'sha256 不符必须记一笔错误');
+    final bRow = await (b.select(b.books)..where((t) => t.id.equals(bookId))).getSingle();
+    expect(bRow.localPath, isNull, reason: '坏文件不应回填 localPath');
+    expect(bStore.files.containsKey(goodSha), isFalse,
+        reason: '坏文件不应被 importFile 写进仓库（应已被丢弃）');
+
+    await a.close();
+    await b.close();
+  });
+}
+
+/// P1 反例用：在下载流里篡改字节，模拟"远端 blob 与元数据 sha256 不符"的损坏场景。
+/// 只在 getBytesStream 路径注入损坏（getIfChanged/getBytes 的 changes 批处理不动），
+/// 让书文件传输分支精确命中校验失败逻辑。
+class _CorruptingWebDavClient extends MockWebDavClient {
+  @override
+  Stream<List<int>> getBytesStream(String path,
+      {void Function(int, int)? onProgress}) async* {
+    final bytes = await getBytes(path, onProgress: onProgress);
+    // 首字节翻转 → 整个文件的 sha256 不再等于元数据里的 goodSha
+    final corrupted = Uint8List.fromList(bytes);
+    if (corrupted.isNotEmpty) corrupted[0] ^= 0xFF;
+    yield corrupted;
+  }
 }
