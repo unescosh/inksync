@@ -282,7 +282,7 @@ impl WebDavClient {
         let dest = self.url(to)?.to_string();
         let resp = retry(3, || {
             Ok(self
-                .req(cfg, Method::MOVE, from)
+                .req(cfg, Method::from_bytes(b"MOVE").unwrap(), from)
                 .header("Destination", &dest)
                 .header("Overwrite", "T")
                 .send()?)
