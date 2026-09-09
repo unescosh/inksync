@@ -1146,11 +1146,13 @@ void main() {
 
     // B 端拉取，但下载被钩子篡改 → sha256 不符
     final bStore = _CopyingBlobStore();
-    final repB = await makeEngine(b, client, 'bbbbbbbb', bStore).sync();
+    final repB = await makeEngine(b, corrupt, 'bbbbbbbb', bStore).sync();
     expect(repB.downloadedBooks, 0, reason: '校验失败的字节不应算"已下载"');
     expect(repB.errors, isNotEmpty, reason: 'sha256 不符必须记一笔错误');
     final bRow = await (b.select(b.books)..where((t) => t.id.equals(bookId))).getSingle();
-    expect(bRow.localPath, isNull, reason: '坏文件不应回填 localPath');
+    // 注意：isNull 在 drift 与 matcher 间有 ambiguous_import，改用 == null 比较
+    // （与 P0 测试同款写法）。
+    expect(bRow.localPath == null, isTrue, reason: '坏文件不应回填 localPath');
     expect(bStore.files.containsKey(goodSha), isFalse,
         reason: '坏文件不应被 importFile 写进仓库（应已被丢弃）');
 
