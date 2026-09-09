@@ -171,7 +171,8 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
           ),
           ],
         ),
-        ],
+        ),
+      ],
       ),
       floatingActionButton: FloatingActionButton(
         onPressed: () => Navigator.of(context).pushNamed('/import'),
