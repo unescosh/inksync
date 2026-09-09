@@ -217,6 +217,11 @@ class SyncEngine {
 
   void _emit(SyncPhase phase, String detail, [double? f]) => onProgress?.call(phase, detail, f);
 
+  /// 上次传输是否留下尾巴（有失败/未完成的文件）。
+  /// 为 true 时即便本轮「无变更」也要跑一次传输，否则失败的那本永远补不回来。
+  Future<bool> _hasPendingTransfers() async =>
+      await db.getState(SyncStateKeys.pendingTransfers) == '1';
+
   // ══════════════════════ 主流程 ══════════════════════
 
   Future<SyncReport> sync() async {
@@ -270,16 +275,30 @@ class SyncEngine {
       ..sort(); // 字典序 = 时间序
 
     // 3. 下载并应用
+    //
+    // 水位线只推进到「从头连续成功应用」的最后一个批次。任何失败/部分失败的批次
+    // 都必须留在未应用区间，下次重新拉取重试——否则 `h.compareTo(lastApplied) > 0`
+    // 会把它永久过滤掉，等于静默丢数据（哪怕当初只是网络抖了一下）。
+    // 重试是安全的：同一条记录重放时 `remoteHlc <= localHlc`，`_mergeInto` 直接返回。
     _emit(SyncPhase.applying, '应用 ${pending.length} 个远端批次');
+    var appliedThrough = lastApplied;
+    var blocked = false;
     for (var i = 0; i < pending.length; i++) {
       final name = pending[i];
+      final batchHlc = _hlcOfFileName(name);
       try {
         final bytes = await client.getBytes('$_changesPath/$name');
-        final applied = await _applyBatch(utf8.decode(bytes), report);
-        report.pulledChanges += applied;
+        final r = await _applyBatch(utf8.decode(bytes), report);
+        report.pulledChanges += r.applied;
+        if (!r.ok) {
+          blocked = true; // 批内有记录没落地 → 整批重来
+        } else if (!blocked && batchHlc != null && batchHlc.compareTo(appliedThrough) > 0) {
+          appliedThrough = batchHlc;
+        }
       } catch (e) {
-        // 单个批次失败不能拖垮整轮同步：记账后继续
+        // 单个批次失败不能拖垮整轮同步：记账后继续，但从这里起水位线不再推进。
         report.errors.add('批次 $name 应用失败: $e');
+        blocked = true;
       }
       _emit(SyncPhase.applying, '应用远端变更', (i + 1) / (pending.isEmpty ? 1 : pending.length));
     }
@@ -289,13 +308,29 @@ class SyncEngine {
     final pushed = await _pushChanges();
     report.pushedChanges = pushed;
 
-    // 5. 传输书籍文件（内容寻址，已存在即秒传跳过）
-    _emit(SyncPhase.transferring, '同步书籍文件');
-    await _transferBlobs(report);
-
-    // 5b. 传输封面图片（内容寻址，缺则补传/补下，落盘后回填 coverPath）
-    _emit(SyncPhase.transferring, '同步封面图片');
-    await _transferCovers(report);
+    // 5. 传输书籍文件 + 封面（内容寻址，已存在即秒传跳过）
+    //
+    // 短路：manifest 未变（304）+ 本轮没推任何本地变更 + 上次传输没留尾巴
+    // ⇒ 没有任何新工作需要探测远端，直接跳过 O(书本数) 的远端存在性检查。
+    // 这是 5 分钟轮询能否成立的关键：`_transferBlobs`/`_transferCovers` 对每本书
+    // 各发一次探测，200 本书就是 ~400 次请求/轮，约 4800 次/小时。
+    // 前提（与本项目一致）：outbox 是本地变更的唯一事实来源，所以「没有本地变更
+    // 要推 + 远端没变」时，不可能凭空冒出待传文件。
+    final idle = got == null && pushed == 0 && !await _hasPendingTransfers();
+    if (idle) {
+      _emit(SyncPhase.transferring, '无变更，跳过文件传输');
+    } else {
+      final errsBefore = report.errors.length;
+      _emit(SyncPhase.transferring, '同步书籍文件');
+      await _transferBlobs(report);
+      _emit(SyncPhase.transferring, '同步封面图片');
+      await _transferCovers(report);
+      // 传输失败要留痕：下次即便「无变更」也要重试，否则这本永远补传不了。
+      await db.setState(
+        SyncStateKeys.pendingTransfers,
+        report.errors.length > errsBefore ? '1' : '0',
+      );
+    }
 
     // 5c. 对齐本地仓库：无头 CLI `pull` 已把 blobs/covers 写进本地仓库，
     //     但 App 主库的 localPath/coverPath 是后来才回填的可空缓存列，
@@ -306,7 +341,7 @@ class SyncEngine {
 
     // 6. 写 manifest（乐观锁）
     _emit(SyncPhase.finalizing, '写入 manifest');
-    final newManifest = await _buildManifest();
+    final newManifest = await _buildManifest(appliedThrough);
     final body = utf8.encode(jsonEncode(newManifest.toJson()));
     final ok = await client.putIfMatch(_manifestPath, body, manifestEtag);
     if (!ok) return false;
@@ -324,8 +359,15 @@ class SyncEngine {
 
   // ══════════════════════ 应用远端变更 ══════════════════════
 
-  Future<int> _applyBatch(String jsonl, SyncReport report) async {
+  /// 返回（成功应用的记录数, 是否**全部**成功）。
+  ///
+  /// 「全部成功」这个返回值很关键：只要有一条记录没落地，整批就不能算应用完成，
+  /// 否则水位线一旦推进，下次 `h.compareTo(lastApplied) > 0` 会把这个批次过滤掉
+  /// —— 该变更就永久丢失了（哪怕当初只是网络抖了一下）。水位线逻辑见 `_syncOnce`
+  /// 的 `appliedThrough`。
+  Future<({int applied, bool ok})> _applyBatch(String jsonl, SyncReport report) async {
     var count = 0;
+    var ok = true;
     for (final line in const LineSplitter().convert(jsonl)) {
       if (line.trim().isEmpty) continue;
       try {
@@ -334,9 +376,10 @@ class SyncEngine {
         count++;
       } catch (e) {
         report.errors.add('记录解析失败: $e');
+        ok = false;
       }
     }
-    return count;
+    return (applied: count, ok: ok);
   }
 
   Future<void> _applyRecord(Map<String, dynamic> rec, SyncReport report) async {
@@ -554,7 +597,11 @@ class SyncEngine {
     return rows.length;
   }
 
-  Future<Manifest> _buildManifest() async {
+  /// [appliedThrough] 是本端「已成功应用到」的水位线（由 `_syncOnce` 算出）。
+  ///
+  /// manifest 的 lastHlc **必须**用它，而不能取目录里最新文件的文件名：后者会把
+  /// 应用失败的批次也算成已应用，于是它们再也不会被拉取 —— 静默丢数据。
+  Future<Manifest> _buildManifest(Hlc appliedThrough) async {
     final entries = await client.propfind('$_changesPath/', depth: 1);
     final files = entries
         .where((e) => !e.isDir && e.name.endsWith('.jsonl'))
@@ -568,7 +615,9 @@ class SyncEngine {
 
     // 只保留最近 200 个批次，更老的按需从目录列表重建，避免 manifest 无限膨胀
     final kept = files.length > 200 ? files.sublist(files.length - 200) : files;
-    final lastHlc = kept.isEmpty ? (await db.lastAppliedHlc).encode() : _hlcOfFileName(kept.last.name)!.encode();
+    // 注意：不要再写成 `_hlcOfFileName(kept.last.name)` —— 那是「远端最新」，
+    // 不是「本端已应用」。两者在批次失败时会分叉，用错就会丢变更。
+    final lastHlc = appliedThrough.encode();
 
     return Manifest(schema: 1, lastHlc: lastHlc, files: kept);
   }
@@ -632,10 +681,9 @@ class SyncEngine {
     }
   }
 
-  Future<bool> _remoteHasBlob(String sha) async {
-    final entries = await client.propfind('$_blobsPath/${sha.substring(0, 2)}/', depth: 1);
-    return entries.any((e) => e.name == sha);
-  }
+  /// 精确探测单个 blob：`propfind` depth 0，只回该资源自身。
+  /// 不要改回「列整个分片目录再在内存里比对」——那会拉回最多 256 条目录项。
+  Future<bool> _remoteHasBlob(String sha) => client.exists(blobRemotePath(sha));
 
   // ─────────────────────────── 封面图片传输 ───────────────────────────
   //
@@ -692,10 +740,7 @@ class SyncEngine {
     }
   }
 
-  Future<bool> _remoteHasCover(String hash) async {
-    final entries = await client.propfind('$_coversPath/${hash.substring(0, 2)}/', depth: 1);
-    return entries.any((e) => e.name == hash);
-  }
+  Future<bool> _remoteHasCover(String hash) => client.exists(coverRemotePath(hash));
 
   /// 把无头 CLI `pull` 已落到本地 blob/cover 仓库、但 drift 主库里
   /// `localPath`/`coverPath` 仍为空的行补回来（见 docs/02 §5.2.2、docs/09）。

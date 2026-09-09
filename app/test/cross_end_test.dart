@@ -59,8 +59,23 @@ class MockWebDavClient extends WebDavClient {
 
   @override
   Future<List<DavEntry>> propfind(String path, {int depth = 1}) async {
-    final dir = _norm(path);
-    final prefix = dir.endsWith('/') ? dir : '$dir/';
+    final key = _norm(path);
+    // 精确探测（exists() → depth 0，或按完整路径查单个资源）：真实 WebDAV 会返回
+    // 该项自身。不特判的话，下面的前缀逻辑会把 '.../ab/<sha>' 当成目录前缀而永远
+    // 查不到，导致 exists() 恒为 false —— 下载分支就永远不会触发。
+    final self = _store[key];
+    if (self != null) {
+      return [
+        DavEntry(
+          path: key,
+          name: key.split('/').last,
+          isDir: false,
+          etag: self.etag,
+          size: self.bytes.length,
+        ),
+      ];
+    }
+    final prefix = key.endsWith('/') ? key : '$key/';
     final out = <DavEntry>[];
     for (final e in _store.entries) {
       if (!e.key.startsWith(prefix)) continue;
@@ -98,6 +113,21 @@ class MockWebDavClient extends WebDavClient {
     if (etag != null && f != null && f.etag != etag) return false; // 412 冲突
     _store[k] = _MockFile(Uint8List.fromList(body), _newEtag());
     return true;
+  }
+}
+
+/// P0 回归用：可让「拉取 changes 批次」这一环抛错，模拟网络抖动。
+/// 关键是**可治愈**——failChanges 置回 false 后，同一份远端内容仍能被重新拉取，
+/// 以此验证失败的批次不会被水位线永久跳过（否则就是静默丢数据）。
+class _FlakyWebDavClient extends MockWebDavClient {
+  bool failChanges = false;
+
+  @override
+  Future<Uint8List> getBytes(String path, {void Function(int, int)? onProgress}) async {
+    if (failChanges && path.contains('/changes/')) {
+      throw WebDavException(503, '模拟网络抖动');
+    }
+    return super.getBytes(path, onProgress: onProgress);
   }
 }
 
@@ -851,5 +881,63 @@ void main() {
     expect(remaining.length, 1, reason: 'dismiss 后只剩 1 条冲突');
 
     await db.close();
+  });
+
+  test('P0: 远端批次应用失败不推进水位线（失败批次下次重试，不丢数据）', () async {
+    // 回归守卫：旧实现把 lastAppliedHlc 推进到「目录里最新批次」而非「本端已成功
+    // 应用的批次」，于是失败的批次下次被 `h > lastApplied` 过滤掉 → 永久丢失。
+    final a = AppDatabase.forTesting(NativeDatabase.memory());
+    final b = AppDatabase.forTesting(NativeDatabase.memory());
+    final client = _FlakyWebDavClient();
+
+    // A 端造一本书并推上去
+    const bookId = 'book-p0';
+    final h = Hlc(wallMs: 2000, counter: 0, node: 'aaaaaaaa');
+    await a.into(a.books).insert(BooksCompanion.insert(
+          id: bookId,
+          sha256: '',
+          format: 'epub',
+          title: 'P0 书',
+          addedAt: DateTime.parse(_t),
+          updatedAt: DateTime.parse(_t),
+          hlc: h.encode(),
+          updatedBy: 'aaaaaaaa',
+        ));
+    await enqueueRaw(a, 'book', bookId, 'upsert', {
+      'id': bookId,
+      'sha256': '',
+      'format': 'epub',
+      'title': 'P0 书',
+      'hlc': h.encode(),
+      'updatedBy': 'aaaaaaaa',
+    }, h.encode());
+    await makeEngine(a, client, 'aaaaaaaa', FakeBlobStore(), FakeCoverStore()).sync();
+
+    // B 端第一次同步：拉批次时网络抖动 → 该批次应用失败
+    client.failChanges = true;
+    final rep1 =
+        await makeEngine(b, client, 'bbbbbbbb', FakeBlobStore(), FakeCoverStore()).sync();
+    expect(rep1.errors, isNotEmpty, reason: '拉取失败应记账');
+    expect(
+      await (b.select(b.books)..where((t) => t.id.equals(bookId))).getSingleOrNull(),
+      isNull,
+      reason: '批次没应用成功，书不该出现',
+    );
+    // 关键断言：水位线必须仍停在起点（未推进）。
+    // 否则下次 h.compareTo(lastApplied) > 0 会把它过滤掉 → 永久丢数据。
+    expect(
+      (await b.lastAppliedHlc).encode(),
+      Hlc.zero.encode(),
+      reason: '失败的批次不能算作已应用',
+    );
+
+    // 恢复后再同步：同一批次应被重新拉取并成功应用
+    client.failChanges = false;
+    final rep2 =
+        await makeEngine(b, client, 'bbbbbbbb', FakeBlobStore(), FakeCoverStore()).sync();
+    expect(rep2.errors, isEmpty, reason: '恢复后应无错误');
+    final got = await (b.select(b.books)..where((t) => t.id.equals(bookId))).getSingleOrNull();
+    expect(got, isNotNull, reason: '失败的批次必须能重试成功，而不是永久丢失');
+    expect(got!.title, 'P0 书');
   });
 }

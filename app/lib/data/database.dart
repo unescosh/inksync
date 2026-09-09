@@ -700,6 +700,8 @@ class SyncStateKeys {
   static const manifestEtag = 'manifestEtag';
   static const deviceId = 'deviceId';
   static const lastSyncAt = 'lastSyncAt';
+  /// '1' = 上次传输有失败/未完成的文件，下次即便「无变更」也要重试传输。
+  static const pendingTransfers = 'pendingTransfers';
   static const sortSpec = 'pref.sortSpec'; // 本地偏好，不同步
   static const groupSpec = 'pref.groupSpec';
 }
