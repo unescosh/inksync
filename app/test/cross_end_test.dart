@@ -112,6 +112,17 @@ class FakeBlobStore extends BlobStore {
   Future<String> importFile(String sourcePath, String sha256) async => sourcePath;
 }
 
+/// 预置若干 sha256→绝对路径的种子 blob 仓库，模拟"无头 CLI 已把书文件写进本地仓库"。
+/// pathFor 命中即返回种子路径，便于断言 reconcileLocalRepo 把 localPath 补回来。
+class _SeededBlobStore extends BlobStore {
+  _SeededBlobStore([this.files = const {}]);
+  final Map<String, String> files;
+  @override
+  Future<String?> pathFor(String sha256) async => files[sha256];
+  @override
+  Future<String> importFile(String sourcePath, String sha256) async => sourcePath;
+}
+
 /// 封面仓库的内存版：把文件拷到临时目录并记账 hash→路径，便于断言"封面已落地"。
 class FakeCoverStore extends CoverStore {
   FakeCoverStore([String? dir])
@@ -591,5 +602,78 @@ void main() {
 
     await a.close();
     await b.close();
+  });
+
+  test('T8: 无头 pull 落地的 blobs/covers 经 reconcileLocalRepo 补齐 localPath/coverPath', () async {
+    // 复现无头备份线（docs/09）的收尾缺口：CLI `pull` 直接把书文件与封面写进
+    // <appDocDir>/blobs/... 与 <appDocDir>/cache/covers/...，但 App 主库的
+    // localPath/coverPath 仍是空的缓存列。reconcileLocalRepo 应逐行用
+    // pathFor 兜底查找并回写，让书架 UI 显示"已下载"。
+    TestWidgetsFlutterBinding.ensureInitialized();
+
+    final a = AppDatabase.forTesting(NativeDatabase.memory());
+    final client = MockWebDavClient();
+
+    // 造"书文件"与"封面文件"，模拟无头 CLI 已把它们写进本地仓库（文件真实存在）
+    final bookBytes = Uint8List.fromList([
+      0x50, 0x4B, 0x03, 0x04, ...List.generate(100, (i) => i & 0xFF),
+    ]);
+    final bookSha = sha256.convert(bookBytes).toString();
+    final blobDir = await Directory.systemTemp.createTemp('blob-rec-');
+    final bookFile = File(p.join(blobDir.path, bookSha));
+    await bookFile.writeAsBytes(bookBytes, flush: true);
+
+    final coverBytes = Uint8List.fromList([
+      0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46,
+      ...List.generate(200, (i) => i & 0xFF),
+    ]);
+    final coverHash = sha256.convert(coverBytes).toString();
+    final coverDir = await Directory.systemTemp.createTemp('cov-rec-');
+    final coverFile = File(p.join(coverDir.path, '$coverHash.jpg'));
+    await coverFile.writeAsBytes(coverBytes, flush: true);
+
+    // 无头备份写入的仓库：pathFor 能返回这些已落地的文件（与 DefaultBlobStore 对齐）
+    final blobs = _SeededBlobStore({bookSha: bookFile.path});
+    final covers = FakeCoverStore(coverDir.path)..files[coverHash] = coverFile.path;
+
+    const bookId = 'book-headless';
+    final h = Hlc(wallMs: 1000, counter: 0, node: 'aaaaaaaa');
+    await a.into(a.books).insert(BooksCompanion.insert(
+      id: bookId,
+      sha256: bookSha, // 内容寻址键，非空
+      format: 'epub',
+      title: '无头备份拉回的书',
+      coverHash: Value(coverHash),
+      // 关键：localPath / coverPath 故意留空，模拟 App 主库尚未对齐
+      addedAt: DateTime.parse(_t),
+      updatedAt: DateTime.parse(_t),
+      hlc: h.encode(),
+      updatedBy: 'aaaaaaaa',
+    ));
+
+    // 直接调 reconcileLocalRepo（不经完整 sync，纯测对齐逻辑）
+    final engine = makeEngine(a, client, 'aaaaaaaa', blobs, covers);
+    await engine.reconcileLocalRepo();
+
+    final row = await (a.select(a.books)..where((t) => t.id.equals(bookId))).getSingle();
+    expect(row.localPath, bookFile.path, reason: 'T8: localPath 应被回写为书文件绝对路径');
+    expect(File(row.localPath!).existsSync(), isTrue, reason: 'T8: 回写的书文件应真实存在');
+    expect(row.coverPath, coverFile.path, reason: 'T8: coverPath 应被回写为封面绝对路径');
+    expect(File(row.coverPath!).existsSync(), isTrue, reason: 'T8: 回写的封面文件应真实存在');
+
+    // 重复调用幂等：不抛错、路径不变、不重复写入
+    await engine.reconcileLocalRepo();
+    final row2 = await (a.select(a.books)..where((t) => t.id.equals(bookId))).getSingle();
+    expect(row2.localPath, row.localPath, reason: 'T8: 重复 reconcile 应幂等');
+    expect(row2.coverPath, row.coverPath, reason: 'T8: 重复 reconcile 应幂等');
+
+    // 顺带验证：完整 sync() 的 5c 步也会走到同一逻辑（不报错、路径保持）
+    final rep = await engine.sync();
+    expect(rep.ok, isTrue, reason: 'T8: 含 reconcile 的完整 sync 不应失败: ${rep.errors}');
+    final row3 = await (a.select(a.books)..where((t) => t.id.equals(bookId))).getSingle();
+    expect(row3.localPath, bookFile.path);
+    expect(row3.coverPath, coverFile.path);
+
+    await a.close();
   });
 }

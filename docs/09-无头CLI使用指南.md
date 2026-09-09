@@ -62,9 +62,28 @@ INKSYNC_STORE=/srv/inksync/store
 - `--books` / `--covers`：待备份的源目录（递归扫描，书名=文件名去扩展名）。
 - `--store`：本地仓库根。推送后写入：
   - `store/blobs/<sha[:2]>/<sha>`：书籍原文件（内容寻址）；
-  - `store/covers/<hash>.<ext>`：封面（扩展名按魔数）；
+  - `store/cache/covers/<hash>.<ext>`：封面（扩展名按魔数）；
   - `store/book_index.json`：人类可读清单（sha256/coverHash 映射回书名），便于核对"备份了哪些书"。
 - 远端：与 App 共用的 `inksync/blobs/...`、`inksync/covers/...`。
+
+### 与 App 本地仓库对齐（关键）
+CLI 的落盘布局**刻意与 App 对齐**，这样把 `--store` 指向 App 的文档目录后，CLI 拉回的内容
+App 能直接读到，无需改数据库：
+
+| 内容 | CLI 落盘（`--store` 为根） | App 查找路径（`DefaultBlobStore`/`DefaultCoverStore`） |
+|---|---|---|
+| 书籍 | `<store>/blobs/<sha[:2]>/<sha>` | `<appDocDir>/blobs/<sha[:2]>/<sha>` |
+| 封面 | `<store>/cache/covers/<hash>.<ext>` | `<appDocDir>/cache/covers/<hash>.<ext>` |
+
+做法：把 `--store` 设为 App 的 `getApplicationDocumentsDirectory()` 返回路径（桌面端通常是
+`$XDG_DATA_HOME/<bundleId>/` 或 `~/.config/<app>/`，Android/iOS 为应用私有目录）。`pull` 之后，
+App 通过 `pathFor(sha256/coverHash)` 即可命中本地文件（即便 `Books.localPath`/`coverPath`
+这两列还是空——它们是可选缓存列，`pathFor` 是兜底查找）。若要让书架 UI 直接显示为"已下载"，
+需要把命中的路径回写进 `localPath`/`coverPath`：
+
+- **自动**：`SyncEngine.reconcileLocalRepo()` 已在 `_syncOnce` 的 5c 步调用，下一次 App 同步时自动补齐；
+- **即时**：无头 `pull` 完成后（或在 App 启动、恢复本地仓库时）直接调一次 `reconcileLocalRepo()`，
+  立即遍历 `books` 表，按 `pathFor` 命中回写。实现与回归测试见 `docs/02` §5.2.2 与 `app/test/cross_end_test.dart` 的 **T8**。
 
 `book_index.json` 示例：
 

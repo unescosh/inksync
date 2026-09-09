@@ -297,6 +297,13 @@ class SyncEngine {
     _emit(SyncPhase.transferring, '同步封面图片');
     await _transferCovers(report);
 
+    // 5c. 对齐本地仓库：无头 CLI `pull` 已把 blobs/covers 写进本地仓库，
+    //     但 App 主库的 localPath/coverPath 是后来才回填的可空缓存列，
+    //     这里用 pathFor 兜底补齐，让书架 UI 直接显示"已下载"。
+    //     日常同步调用也无害：文件已存在则命中列本非空，不会重复写。
+    _emit(SyncPhase.transferring, '对齐本地仓库');
+    await reconcileLocalRepo();
+
     // 6. 写 manifest（乐观锁）
     _emit(SyncPhase.finalizing, '写入 manifest');
     final newManifest = await _buildManifest();
@@ -669,6 +676,41 @@ class SyncEngine {
   Future<bool> _remoteHasCover(String hash) async {
     final entries = await client.propfind('$_coversPath/${hash.substring(0, 2)}/', depth: 1);
     return entries.any((e) => e.name == hash);
+  }
+
+  /// 把无头 CLI `pull` 已落到本地 blob/cover 仓库、但 drift 主库里
+  /// `localPath`/`coverPath` 仍为空的行补回来（见 docs/02 §5.2.2、docs/09）。
+  ///
+  /// 无头备份线（docs/09）的 `pull` 直接写 `<appDocDir>/blobs/...` 与
+  /// `<appDocDir>/cache/covers/...`——路径刻意与 [DefaultBlobStore]/[DefaultCoverStore]
+  /// 对齐（Rust 侧 `FsBlobStore`/`FsCoverStore` 也按此布局落盘）。但 App 主库的
+  /// `localPath`/`coverPath` 是后来才回填的可空缓存列，无头 `pull` 不经过
+  /// `_transferBlobs`/`_transferCovers` 的回填分支，所以需要这里逐行用
+  /// `blobs.pathFor(sha256)` / `covers.pathFor(coverHash)` 兜底查找，命中且本地
+  /// 文件存在就回写，让书架 UI 直接显示"已下载"。
+  ///
+  /// 同时也在 `_syncOnce` 的 5c 步被调用：日常同步里，若某本书的文件已在本地
+  /// 仓库但库里缓存列恰好为空（例如换端恢复、手动导入），也能在此补齐，无副作用。
+  Future<void> reconcileLocalRepo() async {
+    final books = await (db.select(db.books)).get();
+    for (final b in books) {
+      if (b.sha256.isNotEmpty && (b.localPath == null || b.localPath!.isEmpty)) {
+        final p = await blobs.pathFor(b.sha256);
+        if (p != null && await File(p).exists()) {
+          await (db.update(db.books)..where((t) => t.id.equals(b.id)))
+              .write(BooksCompanion(localPath: Value(p)));
+        }
+      }
+      final hash = b.coverHash;
+      if (hash != null && hash.isNotEmpty &&
+          (b.coverPath == null || b.coverPath!.isEmpty)) {
+        final p = await covers.pathFor(hash);
+        if (p != null && await File(p).exists()) {
+          await (db.update(db.books)..where((t) => t.id.equals(b.id)))
+              .write(BooksCompanion(coverPath: Value(p)));
+        }
+      }
+    }
   }
 
   /// 从图片二进制魔数推断扩展名（与 providers.dart::_coverExt 覆盖的格式对齐）。

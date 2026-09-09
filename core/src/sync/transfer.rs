@@ -55,7 +55,8 @@ pub trait BlobStore {
 pub trait CoverStore {
     /// 返回本地封面绝对路径（带正确扩展名）；不存在返回 `None`。
     fn path_for(&self, cover_hash: &str) -> Result<Option<PathBuf>>;
-    /// 把 `source` 复制为 `<root>/covers/<hash>.<ext>`，返回最终路径。
+    /// 把 `source` 复制为 `<root>/cache/covers/<hash>.<ext>`（与 App 的
+    /// `DefaultCoverStore` 对齐；`FsCoverStore` 经 `cover_dir()` 落盘到此），返回最终路径。
     fn import_file(&self, source: &Path, cover_hash: &str, ext: &str) -> Result<PathBuf>;
 }
 
@@ -332,7 +333,13 @@ impl BlobStore for FsBlobStore {
     }
 }
 
-/// 基于文件系统的 `CoverStore`：`<root>/covers/<hash>.<ext>`。
+/// 基于文件系统的 `CoverStore`。
+///
+/// **刻意与 App 的 `DefaultCoverStore` 对齐**：App 把封面存在
+/// `<appDocDir>/cache/covers/<hash>.<ext>`，书籍原文件存在 `<appDocDir>/blobs/...`
+/// （见 `FsBlobStore`）。所以把 CLI 的 `--store` 指向 App 的文档目录后，CLI `pull`
+/// 拉回的封面正好落在 `<store>/cache/covers/...`、书落在 `<store>/blobs/...`，
+/// 与 App 的 `pathFor(coverHash/sha256)` 查找路径一致——App 无需改 DB 即可直接读到。
 pub struct FsCoverStore {
     pub root: PathBuf,
 }
@@ -341,6 +348,11 @@ impl FsCoverStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
+
+    /// 对齐 App：`DefaultCoverStore` 的本地根 = `<appDocDir>/cache`。
+    fn cover_dir(&self) -> PathBuf {
+        self.root.join("cache").join("covers")
+    }
 }
 
 impl CoverStore for FsCoverStore {
@@ -348,7 +360,7 @@ impl CoverStore for FsCoverStore {
         if cover_hash.is_empty() {
             return Ok(None);
         }
-        let dir = self.root.join("covers");
+        let dir = self.cover_dir();
         for ext in [".jpg", ".png", ".webp", ".gif"] {
             let p = dir.join(format!("{cover_hash}{ext}"));
             if p.exists() {
@@ -359,7 +371,7 @@ impl CoverStore for FsCoverStore {
     }
 
     fn import_file(&self, source: &Path, cover_hash: &str, ext: &str) -> Result<PathBuf> {
-        let dir = self.root.join("covers");
+        let dir = self.cover_dir();
         std::fs::create_dir_all(&dir)?;
         let dest = dir.join(format!("{cover_hash}{ext}"));
         let tmp = dest.with_extension(format!("tmp-{}", nanos()));
