@@ -30,8 +30,13 @@ jobs:
       # drift 的 NativeDatabase（含 .memory()）在 Linux 上需要 sqlite3 原生库做 FFI
       - name: 安装 sqlite3（跨端同步集成测试需要）
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
-      - name: flutter test
-        run: flutter test
+      - name: flutter test (with coverage)
+        run: flutter test --coverage
+      - name: 上传覆盖率
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: coverage/lcov.info
       # 注意：flutter_rust_bridge codegen generate 暂未纳入。
       # 当前 app 不 import 任何生成产物（native_bridge.dart 返回 null、_wire() 已注释），
       # 故 analyze/test 无需它即可通过。待 M2 启用真实 Rust 绑定（打开 _wire()）时，
@@ -50,3 +55,25 @@ jobs:
         run: cargo test
       # 沙箱曾用 nightly + rust-lld 绕过缺 mingw dlltool；CI(ubuntu) 有正常链接器，stable 即可。
       # sync feature 需 C 工具链（cargo zigbuild），本作业未开，待 UOS 打包阶段在用户机验证。
+
+  # 无头 CLI（examples/cli_backup.rs）走 sync feature，需要 mingw 链接器，故单独放 Windows 作业。
+  # continue-on-error：CLI 二进制本身不在主验证路径（其底层 gc_store / transfer / scan 等
+  # 已由默认 features 的 cargo test 单测覆盖）。万一 mingw 安装/链接在 CI 抽风，
+  # 回退为「默认 cargo test 已通过」即可，不让 CLI 编译问题阻塞整条流水线。
+  cli-windows:
+    name: Rust CLI build (sync)
+    runs-on: windows-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      # windows-latest 预装 MSYS2，mingw64 的 gcc/ar 在 C:\msys64\mingw64\bin
+      - name: 配置 PATH（mingw64）
+        run: echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+      - name: cargo build cli_backup (sync feature)
+        run: cargo build --features sync --example cli_backup --target x86_64-pc-windows-gnu
