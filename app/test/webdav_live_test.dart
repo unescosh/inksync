@@ -15,7 +15,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:inksync/sync/webdav_client.dart';
-import 'package:test/test.dart';
+import 'package:flutter_test/flutter_test.dart';
 
 final String _baseUrl =
     Platform.environment['WEBDAV_BASE_URL'] ?? 'http://127.0.0.1:8080/';

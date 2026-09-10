@@ -91,7 +91,14 @@ jobs:
   # ───────────────────────── Windows ─────────────────────────
   windows:
     name: Build Windows (portable)
-    runs-on: windows-latest
+    # 必须用 windows-2022，不能用 windows-latest。
+    # windows-latest 现已预装 Visual Studio 2026（major 18）；而 Flutter 3.22 的
+    # visual_studio.dart 中 cmakeGenerator 对未知主版本会回退到写死的
+    # "Visual Studio 16 2019"，该生成器在 runner 上并不存在 → CMake 报
+    # "could not find any instance of Visual Studio 16 2019"。
+    # windows-2022 只含 VS 2022（major 17，带 NativeDesktop C++ 工作负载 + CMake 3.31），
+    # Flutter 会正确生成 "Visual Studio 17 2022"。待升级到支持 VS 2026 的 Flutter 后再切回。
+    runs-on: windows-2022
     env:
       MSIX_PUBLISHER: ${{ secrets.MSIX_PUBLISHER }}
     defaults:
