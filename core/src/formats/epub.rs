@@ -55,7 +55,7 @@ pub fn parse(path: &Path) -> Result<ParsedBook> {
             continue;
         };
         let chapter_dir = dir_of(&item.href);
-        let xhtml = sanitize_with_base(&raw, &chapter_dir, &base);
+        let xhtml = sanitize_with_base(&raw, &chapter_dir);
         let plain = strip_tags(&xhtml);
         if plain.trim().is_empty() && !xhtml.contains("<img") {
             continue;
@@ -562,7 +562,7 @@ fn sanitize_with_base(raw: &str, chapter_dir: &str) -> String {
             return result;
         };
         let src = &tail[..end];
-        let absolute = join(&join(opf_base, chapter_dir), src);
+        let absolute = join(chapter_dir, src);
         result.push_str("<img src=\"");
         result.push_str(&absolute);
         result.push_str("\"/>");
@@ -589,7 +589,7 @@ pub fn is_image(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::formats::{join, sanitize};
+    use crate::formats::join;
 
     /// 回归：正文在 `OEBPS/Text/chap1.xhtml`，引用 `../Images/pic.png`。
     /// 纠正前会得到 `OEBPS/OEBPS/Images/pic.png`（重复前缀）→ Dart 取图 404。
@@ -614,13 +614,13 @@ mod tests {
         );
     }
 
-    /// 自检：与上方断言一致的底层 join 行为，确保不会回退成重复前缀。
+    /// 自检：与上方断言一致的底层 join 行为，证明旧实现会重复前缀。
     #[test]
     fn join_does_not_double_prefix() {
-        assert_eq!(join("OEBPS/Text", "../Images/pic.png"), "OEBPS/Images/pic.png");
-        assert_eq!(join(join("OEBPS", "OEBPS/Text"), "../Images/pic.png"), "OEBPS/OEBPS/Images/pic.png");
-        // 上方第二行正是「旧实现的错误结果」，证明修复前确实会出错
-        let _ = sanitize;
+        assert_eq!(join("OEBPS/Text", "../Images/pic.png").as_str(), "OEBPS/Images/pic.png");
+        // 下方正是「旧实现的错误结果」，证明修复前确实会出错
+        let broken = join(join("OEBPS", "OEBPS/Text").as_str(), "../Images/pic.png");
+        assert_eq!(broken.as_str(), "OEBPS/OEBPS/Images/pic.png");
     }
 }
 
