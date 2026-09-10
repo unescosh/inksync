@@ -52,6 +52,12 @@ jobs:
       - name: drift codegen (build_runner)
         run: dart run build_runner build --delete-conflicting-outputs
 
+      # 脚手架/迁移 Android 工程到 Flutter 3.22 模板（CI 内一次性，不改动仓库）。
+      # 远程 main 的 android/ 还是旧 Gradle 模板，直接 build 会报 "unsupported Gradle project"。
+      # 正式发布前请在本地执行同样命令并提交生成的 android/（含自定义 AndroidManifest/签名）。
+      - name: flutter create --platforms=android（脚手架/迁移）
+        run: flutter create --platforms=android .
+
       # 仅当配置了签名密钥才走 release + 签名；否则构建 debug APK 仅用于验证工具链
       # （非发布产物）。生产签名需在 android/app/build.gradle 配 signingConfig 读取
       # android/key.properties，并把 KEYSTORE_BASE64 / KEY_ALIAS / KEY_ALIAS_PASSWORD /
@@ -113,24 +119,31 @@ jobs:
       - name: drift codegen (build_runner)
         run: dart run build_runner build --delete-conflicting-outputs
 
+      # 脚手架 Windows 工程（CI 内一次性；远程 main 尚无 windows/ 目录）
+      - name: flutter create --platforms=windows（脚手架）
+        run: flutter create --platforms=windows .
+
       - name: cargo build cdylib (msvc, sync feature) — 验证 Windows Rust 构建
         continue-on-error: true
         working-directory: core
         run: cargo build --release --features sync --target x86_64-pc-windows-msvc
 
-      - name: 复制 inksync_core.dll 到构建产物目录（供日后 FFI 接线）
-        if: success()
+      - name: flutter build windows
+        run: flutter build windows --release
+
+      # 复制 inksync_core.dll 到构建产物目录（供日后 FFI 接线）。App 当前不加载它，
+      # 故缺失/失败都不阻塞；必须在 flutter build 之后（Release 目录此时才存在）。
+      - name: 复制 inksync_core.dll 到构建产物目录（continue-on-error）
+        continue-on-error: true
         shell: pwsh
         run: |
           $dll = "..\core\target\x86_64-pc-windows-msvc\release\inksync_core.dll"
           if (Test-Path $dll) {
             Copy-Item $dll "build\windows\x64\runner\Release\"
+            Write-Host "已复制 inksync_core.dll"
           } else {
             Write-Host "::warning::未生成 inksync_core.dll，跳过复制（App 当前不加载它）"
           }
-
-      - name: flutter build windows
-        run: flutter build windows --release
 
       # msix 商店/侧载包：需在 dev_dependencies 加 msix 并配置 msix_config，
       # 且提供 MSIX_PUBLISHER / MSIX_IDENTITY 等 secrets。缺失时跳过。
@@ -181,6 +194,10 @@ jobs:
 
       - name: drift codegen (build_runner)
         run: dart run build_runner build --delete-conflicting-outputs
+
+      # 脚手架 Linux 工程（CI 内一次性；远程 main 尚无 linux/ 目录）
+      - name: flutter create --platforms=linux（脚手架）
+        run: flutter create --platforms=linux .
 
       # 验证 Rust 在 linux-gnu 下可编译（sync feature）。App 不加载 .so，故失败不阻塞。
       - name: cargo build cdylib (gnu, sync feature) — 验证 Linux Rust 构建
@@ -274,7 +291,7 @@ jobs:
       # 启动 wsgidav（匿名访问，后台运行），等待监听
       - name: 启动 wsgidav 服务端
         run: |
-          python3 -m pip install --upgrade pip wsgidav
+          python3 -m pip install --upgrade pip wsgidav cheroot
           mkdir -p /tmp/wsgidav
           (wsgidav --root /tmp/wsgidav --auth anonymous --port 8080 --host 0.0.0.0 > /tmp/wsgidav.log 2>&1 &)
           for i in $(seq 1 30); do
