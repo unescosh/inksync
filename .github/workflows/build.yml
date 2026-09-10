@@ -1,0 +1,298 @@
+name: Build & Packaging
+
+# 三端打包 + WebDAV 集成测试（docs/03 §5）。
+# 与 ci.yml 的分工：
+#   · ci.yml  = 每次 push/PR 跑「验证」（flutter analyze/test + rust cargo test）
+#   · build.yml = 发布相关「产物」（android/windows/linux 三端打包 + wsgidav 集成测试）
+# 触发：手动 dispatch / 打 v* tag / 发布 release。不挂在 pull_request 上，避免每个 PR 都跑重型打包。
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+  release:
+    types: [published]
+
+# 打包作业不向仓库写回，最小权限即可（upload-artifact 用默认权限）
+permissions:
+  contents: read
+
+jobs:
+  # ───────────────────────── Android ─────────────────────────
+  # 重要：App 当前是纯 Dart（app/lib/sync/native_bridge.dart 的 _wire() 已注释、
+  # createNativeCore 返回 null），不加载任何 Rust .so。因此「无需 cargo ndk」。
+  # 待 M2 启用真实 FFI 时，再在此处加 cargo ndk 步骤并把 .so 打进 jniLibs。
+  android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17' # AGP 8.x 需要 JDK 17
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.0'
+          channel: stable
+
+      - name: flutter pub get
+        run: flutter pub get
+
+      # drift 代码生成（database.g.dart）—— App 编译硬依赖，不跑 analyze/build 都会红
+      - name: drift codegen (build_runner)
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      # 仅当配置了签名密钥才走 release + 签名；否则构建 debug APK 仅用于验证工具链
+      # （非发布产物）。生产签名需在 android/app/build.gradle 配 signingConfig 读取
+      # android/key.properties，并把 KEYSTORE_BASE64 / KEY_ALIAS / KEY_ALIAS_PASSWORD /
+      # KEYSTORE_PASSWORD 作为仓库 secrets 提供。
+      - name: 配置签名（仅当 secrets 提供时）
+        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > android/app/keystore.jks
+          cat > android/key.properties <<EOF
+          storePassword=${{ secrets.KEYSTORE_PASSWORD }}
+          keyPassword=${{ secrets.KEY_ALIAS_PASSWORD }}
+          keyAlias=${{ secrets.KEY_ALIAS }}
+          storeFile=keystore.jks
+          EOF
+
+      - name: flutter build apk
+        run: |
+          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            flutter build apk --release --split-per-abi
+          else
+            echo "::warning::未配置签名密钥 → 构建 debug APK 以验证工具链（非发布产物）"
+            flutter build apk --debug
+          fi
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: app/build/app/outputs/flutter-apk/*.apk
+
+  # ───────────────────────── Windows ─────────────────────────
+  windows:
+    name: Build Windows (portable)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.0'
+          channel: stable
+
+      # Rust（MSVC 目标）：用于验证 Windows 下 Rust 可编译 + 预置 FFI 接线。
+      # App 当前纯 Dart 不加载 .dll，故其失败不阻塞 Flutter 产物。
+      # 注意用 x86_64-pc-windows-msvc（MSVC 链接器），不要用 gnu（mingw 有
+      # "export ordinal too large" 的 65535 符号序号上限问题，见 ci.yml 说明）。
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: flutter pub get
+        run: flutter pub get
+
+      - name: drift codegen (build_runner)
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      - name: cargo build cdylib (msvc, sync feature) — 验证 Windows Rust 构建
+        continue-on-error: true
+        working-directory: core
+        run: cargo build --release --features sync --target x86_64-pc-windows-msvc
+
+      - name: 复制 inksync_core.dll 到构建产物目录（供日后 FFI 接线）
+        if: success()
+        shell: pwsh
+        run: |
+          $dll = "..\core\target\x86_64-pc-windows-msvc\release\inksync_core.dll"
+          if (Test-Path $dll) {
+            Copy-Item $dll "build\windows\x64\runner\Release\"
+          } else {
+            Write-Host "::warning::未生成 inksync_core.dll，跳过复制（App 当前不加载它）"
+          }
+
+      - name: flutter build windows
+        run: flutter build windows --release
+
+      # msix 商店/侧载包：需在 dev_dependencies 加 msix 并配置 msix_config，
+      # 且提供 MSIX_PUBLISHER / MSIX_IDENTITY 等 secrets。缺失时跳过。
+      - name: msix 打包（可选，需 secrets）
+        if: ${{ secrets.MSIX_PUBLISHER != '' }}
+        run: dart run msix:build
+
+      - name: 上传 Windows 构建
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: app/build/windows/x64/runner/Release/**
+
+  # ───────────────────────── Linux (UOS) ─────────────────────────
+  # glibc 2.28 硬约束（UOS 20 = Debian 10）：Flutter 官方预编译 engine 按 glibc 2.31 构建，
+  # 在 2.28 上可能失败。策略：
+  #   1) 在 ubuntu-latest 正常构建（工具链缓存友好）；
+  #   2) 再用 debian:10-slim 容器对产物跑 `ldd`，若报 "not found"（缺 2.29+ 符号）
+  #      即判定不满足 UOS，标红但 continue-on-error 暴露风险，不阻塞其它平台。
+  # 这样既不依赖脆弱的「容器内装 Flutter/Rust」(container: 下 tool-setting action 的 PATH
+  # 不会透传进容器)，又能真正验证 2.28 约束。
+  linux:
+    name: Build Linux .deb (glibc 2.28 probe)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.0'
+          channel: stable
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: 安装 Linux 构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config \
+            libgtk-3-dev liblzma-dev libsecret-1-dev libsqlite3-dev
+
+      - name: flutter pub get
+        run: flutter pub get
+
+      - name: drift codegen (build_runner)
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      # 验证 Rust 在 linux-gnu 下可编译（sync feature）。App 不加载 .so，故失败不阻塞。
+      - name: cargo build cdylib (gnu, sync feature) — 验证 Linux Rust 构建
+        continue-on-error: true
+        working-directory: core
+        run: cargo build --release --features sync --target x86_64-unknown-linux-gnu
+
+      - name: flutter build linux
+        run: flutter build linux --release
+
+      # glibc 2.28 探针：在 Debian 10 容器里 ldd 产物，检测是否需要 2.29+ 符号
+      - name: glibc 2.28 兼容性探针（UOS 约束）
+        continue-on-error: true
+        run: |
+          docker run --rm \
+            -v "$PWD/app/build/linux/x64/release/bundle":/bundle \
+            debian:10-slim bash -c '
+              if ldd /bundle/inksync 2>&1 | grep -q "not found"; then
+                echo "::error::GLIBC 约束冲突：二进制需要比 2.28 更新的符号，UOS 20 无法运行"
+                ldd /bundle/inksync | grep "not found"
+                exit 1
+              fi
+              echo "glibc 兼容：可在 2.28 (UOS 20) 运行"
+              ldd --version | head -1
+            '
+
+      - name: 打包 .deb
+        if: success()
+        run: |
+          VER=1.0.0
+          PKG="inksync_${VER}_amd64"
+          rm -rf "$PKG"
+          mkdir -p "$PKG/DEBIAN" "$PKG/opt/inksync" "$PKG/usr/share/applications"
+          cp -r build/linux/x64/release/bundle/. "$PKG/opt/inksync/"
+          cat > "$PKG/DEBIAN/control" <<CTRL
+          Package: inksync
+          Version: $VER
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Depends: libgtk-3-0, libblkid1, liblzma5, libjsoncpp1, libsecret-1-0
+          Maintainer: inksync <dev@example.com>
+          Description: 三端同步的漫画/小说阅读器
+          CTRL
+          cat > "$PKG/usr/share/applications/inksync.desktop" <<DESK
+          [Desktop Entry]
+          Type=Application
+          Name=InkSync
+          Name[zh_CN]=墨阅
+          Exec=/opt/inksync/inksync %f
+          Icon=inksync
+          Terminal=false
+          Categories=Office;Viewer;Utility;
+          MimeType=application/epub+zip;application/x-mobipocket-ebook;application/pdf;application/vnd.comicbook+zip;
+          DESK
+          dpkg-deb --build "$PKG"
+
+      - name: 上传 .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb
+          path: app/*.deb
+
+  # ───────────────────────── WebDAV 集成测试 ─────────────────────────
+  # 用 Python wsgidav 起一个支持完整 WebDAV 方法（PROPFIND/MKCOL/MOVE…）的服务端，
+  # 三个虚拟节点并发读写同一目录，由 app/test/webdav_live_test.dart 断言最终一致。
+  test:
+    name: WebDAV 集成测试 (wsgidav)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.0'
+          channel: stable
+
+      - name: flutter pub get
+        run: flutter pub get
+
+      - name: drift codegen (build_runner)
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      # drift NativeDatabase 在 Linux 上需要 sqlite3 原生库做 FFI
+      - name: 安装 sqlite3
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+
+      # 启动 wsgidav（匿名访问，后台运行），等待监听
+      - name: 启动 wsgidav 服务端
+        run: |
+          python3 -m pip install --upgrade pip wsgidav
+          mkdir -p /tmp/wsgidav
+          (wsgidav --root /tmp/wsgidav --auth anonymous --port 8080 --host 0.0.0.0 > /tmp/wsgidav.log 2>&1 &)
+          for i in $(seq 1 30); do
+            # 000 = 连接被拒（未起）；<500 都算"已监听"（根集合可能返回 403）
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/ || true)
+            if [ "$code" != "000" ] && [ "$code" -lt 500 ]; then
+              echo "wsgidav 已就绪 (HTTP $code)"; break
+            fi
+            sleep 1
+          done
+          if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/ || true)" = "000" ]; then
+            echo "::error::wsgidav 未启动，日志如下："; cat /tmp/wsgidav.log
+            exit 1
+          fi
+
+      # Rust core 解析层（默认 features，纯 Rust，不依赖同步网络）单测
+      - name: cargo test（core 默认 features）
+        working-directory: core
+        run: cargo test
+
+      # Dart 全量测试：含 mock 单测 + 上面的 wsgidav 真·集成测试
+      - name: flutter test（含 wsgidav 集成）
+        env:
+          WEBDAV_BASE_URL: http://127.0.0.1:8080/
+          WEBDAV_ROOT: inksync-ci
+        run: flutter test
