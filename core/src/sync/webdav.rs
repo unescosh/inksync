@@ -561,4 +561,8 @@ impl DavFs for WebDavClient {
     fn get_to_file(&self, cfg: &WebDavConfig, path: &str, dest: &Path) -> Result<()> {
         WebDavClient::get_to_file(self, cfg, path, dest)
     }
+
+    fn exists(&self, cfg: &WebDavConfig, path: &str) -> Result<bool> {
+        WebDavClient::exists(self, cfg, path)
+    }
 }

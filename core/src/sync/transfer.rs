@@ -54,6 +54,14 @@ pub trait DavFs {
     /// 完整性交给调用方用 sha256 校验——比对 Content-Length 更可靠，
     /// 也避开「开了 gzip 后声明长度与实际解码字节数不一致」的坑。
     fn get_to_file(&self, cfg: &WebDavConfig, path: &str, dest: &Path) -> Result<()>;
+
+    /// 精确探测某个**资源**是否存在。
+    ///
+    /// 判断"某个 sha 在不在远端"绝不要用 `list_names(所在目录)` 去比对——
+    /// 那会把整个分片目录（最多 256 条）拉回来，200 本书就是 200 次列目录。
+    /// 精确探测只问这一个资源（PROPFIND depth 0），与 Dart 侧 `client.exists()`
+    /// 的修法一致。
+    fn exists(&self, cfg: &WebDavConfig, path: &str) -> Result<bool>;
 }
 
 /// 本地书籍 blob 仓库（按 sha256 内容寻址）。
@@ -93,14 +101,8 @@ pub struct CoverEntry {
 fn blob_remote_path(root: &str, sha: &str) -> String {
     format!("{}/blobs/{}/{}", root.trim_end_matches('/'), &sha[..2], sha)
 }
-fn blob_prefix(root: &str, sha: &str) -> String {
-    format!("{}/blobs/{}", root.trim_end_matches('/'), &sha[..2])
-}
 fn cover_remote_path(root: &str, hash: &str) -> String {
     format!("{}/covers/{}/{}", root.trim_end_matches('/'), &hash[..2], hash)
-}
-fn cover_prefix(root: &str, hash: &str) -> String {
-    format!("{}/covers/{}", root.trim_end_matches('/'), &hash[..2])
 }
 
 /// 从图片二进制魔数推断扩展名（与 Dart `SyncEngine._coverExtForBytes` 对齐）。
@@ -189,10 +191,8 @@ where
         return Ok(());
     }
     let remote = blob_remote_path(remote_root, sha);
-    let remote_has = {
-        let names = fs.list_names(cfg, &blob_prefix(remote_root, sha))?;
-        names.iter().any(|n| n == sha)
-    };
+    // 精确探测：只问这一个资源，不再把整个分片目录（最多 256 条）拉回来比对
+    let remote_has = fs.exists(cfg, &remote)?;
 
     // 本地是否有文件（显式路径优先，否则问仓库）
     let local = match &entry.local_path {
@@ -293,10 +293,8 @@ where
         return Ok(());
     }
     let remote = cover_remote_path(remote_root, hash);
-    let remote_has = {
-        let names = fs.list_names(cfg, &cover_prefix(remote_root, hash))?;
-        names.iter().any(|n| n == hash)
-    };
+    // 同 blobs：精确探测，不列目录
+    let remote_has = fs.exists(cfg, &remote)?;
 
     let local = match &entry.local_path {
         Some(p) if p.exists() => Some(p.clone()),
@@ -871,6 +869,10 @@ mod tests {
             let bytes = self.get_bytes(cfg, path)?;
             std::fs::write(dest, &bytes)?;
             Ok(())
+        }
+
+        fn exists(&self, _cfg: &WebDavConfig, path: &str) -> Result<bool> {
+            Ok(self.store.borrow().contains_key(path))
         }
     }
 
