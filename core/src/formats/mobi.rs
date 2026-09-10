@@ -259,9 +259,6 @@ impl Exth {
         };
         let m = 16;
         let header_len = be32(r0, m + 4) as usize;
-        // MOBI header 偏移 92 = First Image index（封面所在 record）
-        let first_image = be32(r0, m + 92);
-        let _ = first_image;
 
         let exth_start = m + header_len;
         if exth_start + 12 > r0.len() || &r0[exth_start..exth_start + 4] != b"EXTH" {

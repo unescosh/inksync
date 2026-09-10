@@ -542,7 +542,12 @@ fn collect_toc_titles(entries: &[TocEntry], map: &mut HashMap<String, String>) {
 
 /// 净化并把 `<img src>` 改写为**相对 OPF 根目录**的绝对路径，
 /// 这样 Dart 侧只需记住一个 base，就能从 zip 里取图。
-fn sanitize_with_base(raw: &str, chapter_dir: &str, opf_base: &str) -> String {
+///
+/// `chapter_dir` 取自 `dir_of(item.href)`，而 `item.href` 已在 `read_manifest`
+/// 中与 OPF 根目录 `base` 拼接过，故 `chapter_dir` 本身已含根前缀。
+/// 因此直接 `join(chapter_dir, src)` 即可得到正确路径；**切忌再叠一次 OPF base**，
+/// 否则会生成 `OEBPS/OEBPS/Images/...` 这类重复前缀，导致 Dart 取图 404。
+fn sanitize_with_base(raw: &str, chapter_dir: &str) -> String {
     let out = sanitize(raw);
     if !out.contains("<img") {
         return out;
@@ -581,3 +586,41 @@ fn first_line(s: &str, max_chars: usize) -> Option<String> {
 pub fn is_image(name: &str) -> bool {
     is_image_entry(name)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::formats::{join, sanitize};
+
+    /// 回归：正文在 `OEBPS/Text/chap1.xhtml`，引用 `../Images/pic.png`。
+    /// 纠正前会得到 `OEBPS/OEBPS/Images/pic.png`（重复前缀）→ Dart 取图 404。
+    #[test]
+    fn img_src_rewritten_relative_to_opf_root_without_double_prefix() {
+        let raw = "<p>正文</p><img src=\"../Images/pic.png\"/>";
+        let out = sanitize_with_base(raw, "OEBPS/Text");
+        assert!(
+            out.contains("<img src=\"OEBPS/Images/pic.png\"/>"),
+            "got: {out}"
+        );
+    }
+
+    /// 绝对路径（以 / 开头）应去掉前导斜杠、相对 zip 根目录，而不是再叠 OPF 根。
+    #[test]
+    fn img_src_absolute_stripped_to_zip_root() {
+        let raw = "<img src=\"/Images/pic.png\"/>";
+        let out = sanitize_with_base(raw, "OEBPS/Text");
+        assert!(
+            out.contains("<img src=\"Images/pic.png\"/>"),
+            "got: {out}"
+        );
+    }
+
+    /// 自检：与上方断言一致的底层 join 行为，确保不会回退成重复前缀。
+    #[test]
+    fn join_does_not_double_prefix() {
+        assert_eq!(join("OEBPS/Text", "../Images/pic.png"), "OEBPS/Images/pic.png");
+        assert_eq!(join(join("OEBPS", "OEBPS/Text"), "../Images/pic.png"), "OEBPS/OEBPS/Images/pic.png");
+        // 上方第二行正是「旧实现的错误结果」，证明修复前确实会出错
+        let _ = sanitize;
+    }
+}
+
