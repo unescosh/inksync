@@ -71,6 +71,16 @@ pub trait BlobStore {
     /// 把 `source` 复制为内容寻址路径（`<root>/blobs/<sha[:2]>/<sha>`），
     /// 返回最终路径（原子：先 tmp 再 rename）。
     fn import_file(&self, source: &Path, sha256: &str) -> Result<PathBuf>;
+
+    /// 预留一个**位于最终落盘目录内**的暂存文件路径（目录已确保存在）。
+    ///
+    /// 下载时把字节直接写到这里，校验通过后调 [BlobStore::commit_staged] 原子改名。
+    /// 旧做法是"先写系统临时目录、再 `import_file` 整体拷贝进仓库"——大书等于
+    /// 写两遍，临时目录与仓库不同分区时还要跨设备拷贝。同目录 rename 是零拷贝。
+    fn staged_path(&self, sha256: &str) -> Result<PathBuf>;
+
+    /// 把 [BlobStore::staged_path] 写好的暂存文件原子改名为正式内容寻址路径。
+    fn commit_staged(&self, staged: &Path, sha256: &str) -> Result<PathBuf>;
 }
 
 /// 本地封面仓库（按 coverHash 内容寻址，扩展名由魔数决定）。
@@ -80,6 +90,12 @@ pub trait CoverStore {
     /// 把 `source` 复制为 `<root>/cache/covers/<hash>.<ext>`（与 App 的
     /// `DefaultCoverStore` 对齐；`FsCoverStore` 经 `cover_dir()` 落盘到此），返回最终路径。
     fn import_file(&self, source: &Path, cover_hash: &str, ext: &str) -> Result<PathBuf>;
+
+    /// 同 [BlobStore::staged_path]：封面落地目录内的暂存文件（目录已确保存在）。
+    fn staged_path(&self, cover_hash: &str) -> Result<PathBuf>;
+
+    /// 同 [BlobStore::commit_staged]：暂存文件原子改名为 `<hash>.<ext>`。
+    fn commit_staged(&self, staged: &Path, cover_hash: &str, ext: &str) -> Result<PathBuf>;
 }
 
 /// 一条待传输的书籍文件条目。
@@ -218,29 +234,31 @@ where
     if !remote_has {
         return Ok(());
     }
-    let tmp = std::env::temp_dir().join(format!("{}.tmp-{}", sha, nanos()));
-    if let Err(e) = fs.get_to_file(cfg, &remote, &tmp) {
-        let _ = std::fs::remove_file(&tmp);
+    // 直接落到"仓库内的暂存文件"：校验通过后同目录 rename 即可入库，
+    // 省掉"先写系统临时目录、再整体拷贝进仓库"的二次写入（大书等于写两遍，
+    // 临时目录与仓库不同分区时还要跨设备拷贝）。
+    let staged = blob_store.staged_path(sha)?;
+    if let Err(e) = fs.get_to_file(cfg, &remote, &staged) {
+        let _ = std::fs::remove_file(&staged);
         return Err(e);
     }
     // sha256_file 本身是流式分块读的（见 lib.rs），不会把书重新读进内存
-    let actual = match crate::sha256_file(&tmp) {
+    let actual = match crate::sha256_file(&staged) {
         Ok(v) => v,
         Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(&staged);
             return Err(e);
         }
     };
     if actual != *sha {
-        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&staged);
         report.errors.push(format!(
             "《{}》书籍校验失败（期望 {sha}，实际 {actual}），已丢弃",
             entry.title
         ));
         return Ok(());
     }
-    let dest = blob_store.import_file(&tmp, sha)?;
-    let _ = std::fs::remove_file(&tmp);
+    let dest = blob_store.commit_staged(&staged, sha)?;
     on_downloaded(sha, &dest);
     report.downloaded_books += 1;
     Ok(())
@@ -318,29 +336,30 @@ where
         return Ok(());
     }
     // 同 blobs：流式下载落盘 → 流式回读校验 → 魔数只取文件头 12 字节定扩展名
-    let tmp = std::env::temp_dir().join(format!("{}.tmp-{}", hash, nanos()));
-    if let Err(e) = fs.get_to_file(cfg, &remote, &tmp) {
-        let _ = std::fs::remove_file(&tmp);
+    // 同 blobs：落到仓库内暂存文件，避免二次拷贝
+    let staged = cover_store.staged_path(hash)?;
+    if let Err(e) = fs.get_to_file(cfg, &remote, &staged) {
+        let _ = std::fs::remove_file(&staged);
         return Err(e);
     }
-    let actual = match crate::sha256_file(&tmp) {
+    let actual = match crate::sha256_file(&staged) {
         Ok(v) => v,
         Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(&staged);
             return Err(e);
         }
     };
     if actual != *hash {
-        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&staged);
         report.errors.push(format!(
             "《{}》封面校验失败（期望 {hash}，实际 {actual}），已丢弃",
             entry.title
         ));
         return Ok(());
     }
-    let ext = cover_ext_of_file(&tmp)?;
-    let dest = cover_store.import_file(&tmp, hash, ext)?;
-    let _ = std::fs::remove_file(&tmp);
+    // 魔数只取文件头 12 字节定扩展名，不整图读内存
+    let ext = cover_ext_of_file(&staged)?;
+    let dest = cover_store.commit_staged(&staged, hash, ext)?;
     on_downloaded(hash, &dest);
     report.downloaded_covers += 1;
     Ok(())
@@ -375,6 +394,19 @@ impl BlobStore for FsBlobStore {
         let tmp = dest.with_extension(format!("tmp-{}", nanos()));
         std::fs::copy(source, &tmp)?;
         std::fs::rename(&tmp, &dest)?;
+        Ok(dest)
+    }
+
+    fn staged_path(&self, sha256: &str) -> Result<PathBuf> {
+        let dir = self.root.join("blobs").join(&sha256[..2]);
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir.join(format!("{sha256}.tmp-{}", nanos())))
+    }
+
+    fn commit_staged(&self, staged: &Path, sha256: &str) -> Result<PathBuf> {
+        let dest = self.root.join("blobs").join(&sha256[..2]).join(sha256);
+        // 暂存文件就在 dest 同目录，rename 是同分区原子操作 → 零拷贝
+        std::fs::rename(staged, &dest)?;
         Ok(dest)
     }
 }
@@ -423,6 +455,18 @@ impl CoverStore for FsCoverStore {
         let tmp = dest.with_extension(format!("tmp-{}", nanos()));
         std::fs::copy(source, &tmp)?;
         std::fs::rename(&tmp, &dest)?;
+        Ok(dest)
+    }
+
+    fn staged_path(&self, cover_hash: &str) -> Result<PathBuf> {
+        let dir = self.cover_dir();
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir.join(format!("{cover_hash}.tmp-{}", nanos())))
+    }
+
+    fn commit_staged(&self, staged: &Path, cover_hash: &str, ext: &str) -> Result<PathBuf> {
+        let dest = self.cover_dir().join(format!("{cover_hash}{ext}"));
+        std::fs::rename(staged, &dest)?;
         Ok(dest)
     }
 }
@@ -889,6 +933,16 @@ mod tests {
             self.files.borrow_mut().insert(sha.to_string(), dest.clone());
             Ok(dest)
         }
+        fn staged_path(&self, sha: &str) -> Result<PathBuf> {
+            Ok(std::env::temp_dir().join(format!("{sha}.staged-{}", nanos())))
+        }
+        fn commit_staged(&self, staged: &Path, sha: &str) -> Result<PathBuf> {
+            let dest = std::env::temp_dir().join(sha);
+            std::fs::copy(staged, &dest)?;
+            let _ = std::fs::remove_file(staged);
+            self.files.borrow_mut().insert(sha.to_string(), dest.clone());
+            Ok(dest)
+        }
     }
 
     struct MemCoverStore {
@@ -901,6 +955,16 @@ mod tests {
         fn import_file(&self, source: &Path, h: &str, ext: &str) -> Result<PathBuf> {
             let dest = std::env::temp_dir().join(format!("{h}{ext}"));
             std::fs::copy(source, &dest)?;
+            self.files.borrow_mut().insert(h.to_string(), dest.clone());
+            Ok(dest)
+        }
+        fn staged_path(&self, h: &str) -> Result<PathBuf> {
+            Ok(std::env::temp_dir().join(format!("{h}.staged-{}", nanos())))
+        }
+        fn commit_staged(&self, staged: &Path, h: &str, ext: &str) -> Result<PathBuf> {
+            let dest = std::env::temp_dir().join(format!("{h}{ext}"));
+            std::fs::copy(staged, &dest)?;
+            let _ = std::fs::remove_file(staged);
             self.files.borrow_mut().insert(h.to_string(), dest.clone());
             Ok(dest)
         }
