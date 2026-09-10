@@ -1,3 +1,10 @@
+// ⚠️ 本文件与 Dart 侧 `app/lib/sync/merge.dart` 是**同一套冲突解决语义的两份实现**。
+// 改这里必须同步改 Dart 那份，反之亦然 —— 两边一旦语义分叉，就是最难查的一类 bug：
+// 同一条变更在手机端与 UOS 端合并出不同结果，且不报错、只在事后表现为数据不一致。
+//
+// 当前 Rust 侧**没有生产消费者**：无头 CLI 按设计只做二进制备份/恢复（docs/09 第 3 节
+// 明确分工：元数据三方合并归 App），本文件的消费者是「未来的 Rust SyncEngine」
+// （docs/02 §5）。所以它只对自身单测负责 —— 改动时请显式比对 Dart 那份的用例。
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
