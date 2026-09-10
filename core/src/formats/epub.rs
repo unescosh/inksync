@@ -590,6 +590,7 @@ pub fn is_image(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::formats::join;
+    use super::sanitize_with_base;
 
     /// 回归：正文在 `OEBPS/Text/chap1.xhtml`，引用 `../Images/pic.png`。
     /// 纠正前会得到 `OEBPS/OEBPS/Images/pic.png`（重复前缀）→ Dart 取图 404。
