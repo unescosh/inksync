@@ -296,10 +296,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
 
       # 启动 wsgidav（匿名访问，后台运行），等待监听
+      # 关键：客户端基准 URL 为 /inksync-ci/（见 webdav_live_test.dart 的 WEBDAV_ROOT），
+      # 因此必须在共享根下预先建好 inksync-ci 这个集合；否则其下所有 MKCOL/PUT/MOVE
+      # 都会返回 409（父集合不存在）。仅 mkdir /tmp/wsgidav 不够。
       - name: 启动 wsgidav 服务端
         run: |
           python3 -m pip install --upgrade pip wsgidav cheroot
-          mkdir -p /tmp/wsgidav
+          mkdir -p /tmp/wsgidav/inksync-ci
           (wsgidav --root /tmp/wsgidav --auth anonymous --port 8080 --host 0.0.0.0 > /tmp/wsgidav.log 2>&1 &)
           for i in $(seq 1 30); do
             # 000 = 连接被拒（未起）；<500 都算"已监听"（根集合可能返回 403）

@@ -8,7 +8,8 @@
 //   · wsgidav 监听 http://127.0.0.1:8080/（匿名访问）
 //   · 共享根目录由 WEBDAV_ROOT 指定（默认 inksync-ci）
 // 本地手动跑：
-//   pip install wsgidav && (wsgidav --root /tmp/wsgidav --auth anonymous --port 8080 --host 0.0.0.0 &)
+//   pip install wsgidav && mkdir -p /tmp/wsgidav/inksync-ci
+//   (wsgidav --root /tmp/wsgidav --auth anonymous --port 8080 --host 0.0.0.0 &)
 //   WEBDAV_BASE_URL=http://127.0.0.1:8080/ flutter test test/webdav_live_test.dart
 
 import 'dart:convert';
