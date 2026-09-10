@@ -16,6 +16,7 @@
 //!    `SyncReport.uploaded_covers` / `downloaded_covers` 字段从"暂不使用"变为真正产出。
 
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -23,7 +24,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::model::{SyncReport, WebDavConfig};
-use crate::sha256_bytes;
 
 /// 远端文件系统接缝：传输编排只依赖这组纯抽象，从而能在无真实服务器时单测。
 ///
@@ -41,6 +41,19 @@ pub trait DavFs {
 
     /// 原子写入（先临时名再改名；内存实现直接存）。
     fn put_atomic(&self, cfg: &WebDavConfig, path: &str, body: Vec<u8>) -> Result<()>;
+
+    /// 流式上传：把本地文件 `local`（字节数 `len`）直接推到远端，**不整文件进内存**。
+    ///
+    /// 这是大书（cbz / pdf 动辄几百 MB）不 OOM 的关键，与 Dart 侧
+    /// `putAtomicStream` 对齐。小数据（manifest / 变更批次）继续用 [DavFs::put_atomic]。
+    fn put_file(&self, cfg: &WebDavConfig, path: &str, local: &Path, len: u64) -> Result<()>;
+
+    /// 流式下载：边收边写进本地文件 `dest`，**不整文件进内存**（与 Dart 侧
+    /// `getBytesStream` 对齐）。
+    ///
+    /// 完整性交给调用方用 sha256 校验——比对 Content-Length 更可靠，
+    /// 也避开「开了 gzip 后声明长度与实际解码字节数不一致」的坑。
+    fn get_to_file(&self, cfg: &WebDavConfig, path: &str, dest: &Path) -> Result<()>;
 }
 
 /// 本地书籍 blob 仓库（按 sha256 内容寻址）。
@@ -107,6 +120,17 @@ pub fn cover_ext(bytes: &[u8]) -> &'static str {
     } else {
         ".jpg"
     }
+}
+
+/// 从文件头部魔数推断封面扩展名：只读前 12 字节，不把整张图读进内存。
+///
+/// 流式下载落地后用它决定文件名后缀——避免为了探测格式又把整文件加载一遍，
+/// 否则"流式"省下的内存会在这一步被吃回去。
+fn cover_ext_of_file(path: &Path) -> Result<&'static str> {
+    let mut f = std::fs::File::open(path)?;
+    let mut head = [0u8; 12];
+    let n = f.read(&mut head)?;
+    Ok(cover_ext(&head[..n]))
 }
 
 fn nanos() -> u128 {
@@ -181,28 +205,40 @@ where
 
     if let Some(local) = local {
         if !remote_has {
-            let bytes = std::fs::read(&local)?;
-            fs.put_atomic(cfg, &remote, bytes)?;
+            // 流式上传：不再 `std::fs::read` 整文件（几百 MB 的 cbz 会直接吃满内存），
+            // 而是把文件长度 + 路径交给传输层，由它流式推送（Dart 侧 putAtomicStream 同款）。
+            let len = std::fs::metadata(&local)?.len();
+            fs.put_file(cfg, &remote, &local, len)?;
             report.uploaded_books += 1;
         }
         return Ok(());
     }
 
-    // 下载分支
+    // 下载分支（流式：边收边落盘 → 流式回读校验 sha256 → 入库，全程不整文件进内存）
     if !remote_has {
         return Ok(());
     }
-    let bytes = fs.get_bytes(cfg, &remote)?;
-    let actual = sha256_bytes(&bytes);
+    let tmp = std::env::temp_dir().join(format!("{}.tmp-{}", sha, nanos()));
+    if let Err(e) = fs.get_to_file(cfg, &remote, &tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    // sha256_file 本身是流式分块读的（见 lib.rs），不会把书重新读进内存
+    let actual = match crate::sha256_file(&tmp) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
     if actual != *sha {
+        let _ = std::fs::remove_file(&tmp);
         report.errors.push(format!(
             "《{}》书籍校验失败（期望 {sha}，实际 {actual}），已丢弃",
             entry.title
         ));
         return Ok(());
     }
-    let tmp = std::env::temp_dir().join(format!("{}.tmp-{}", sha, nanos()));
-    std::fs::write(&tmp, &bytes)?;
     let dest = blob_store.import_file(&tmp, sha)?;
     let _ = std::fs::remove_file(&tmp);
     on_downloaded(sha, &dest);
@@ -272,8 +308,9 @@ where
 
     if let Some(local) = local {
         if !remote_has {
-            let bytes = std::fs::read(&local)?;
-            fs.put_atomic(cfg, &remote, bytes)?;
+            // 同 blobs：流式上传，不整文件进内存
+            let len = std::fs::metadata(&local)?.len();
+            fs.put_file(cfg, &remote, &local, len)?;
             report.uploaded_covers += 1;
         }
         return Ok(());
@@ -282,18 +319,28 @@ where
     if !remote_has {
         return Ok(());
     }
-    let bytes = fs.get_bytes(cfg, &remote)?;
-    let actual = sha256_bytes(&bytes);
+    // 同 blobs：流式下载落盘 → 流式回读校验 → 魔数只取文件头 12 字节定扩展名
+    let tmp = std::env::temp_dir().join(format!("{}.tmp-{}", hash, nanos()));
+    if let Err(e) = fs.get_to_file(cfg, &remote, &tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    let actual = match crate::sha256_file(&tmp) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
     if actual != *hash {
+        let _ = std::fs::remove_file(&tmp);
         report.errors.push(format!(
             "《{}》封面校验失败（期望 {hash}，实际 {actual}），已丢弃",
             entry.title
         ));
         return Ok(());
     }
-    let ext = cover_ext(&bytes);
-    let tmp = std::env::temp_dir().join(format!("{}.tmp-{}", hash, nanos()));
-    std::fs::write(&tmp, &bytes)?;
+    let ext = cover_ext_of_file(&tmp)?;
     let dest = cover_store.import_file(&tmp, hash, ext)?;
     let _ = std::fs::remove_file(&tmp);
     on_downloaded(hash, &dest);
@@ -754,11 +801,28 @@ impl BookIndex {
 mod tests {
     use super::*;
     use crate::error::Error;
-    use std::cell::RefCell;
+    // 非测试代码已全部改用流式 `crate::sha256_file`，这里只在断言里需要整段哈希
+    use crate::sha256_bytes;
+    use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
 
     struct MemDav {
         store: RefCell<HashMap<String, Vec<u8>>>,
+        /// 流式方法的命中计数：用来断言大文件确实走 `put_file` / `get_to_file`，
+        /// 而不是退回"整文件进内存"的 `put_atomic(Vec<u8>)` / `get_bytes`
+        /// （对应 Dart 侧 MockWebDavClient 的 streamPutCount / streamGetCount）。
+        put_file_calls: Cell<u32>,
+        get_to_file_calls: Cell<u32>,
+    }
+
+    impl MemDav {
+        fn new() -> Self {
+            Self {
+                store: RefCell::new(HashMap::new()),
+                put_file_calls: Cell::new(0),
+                get_to_file_calls: Cell::new(0),
+            }
+        }
     }
 
     impl DavFs for MemDav {
@@ -785,6 +849,27 @@ mod tests {
         }
         fn put_atomic(&self, _cfg: &WebDavConfig, path: &str, body: Vec<u8>) -> Result<()> {
             self.store.borrow_mut().insert(path.to_string(), body);
+            Ok(())
+        }
+
+        fn put_file(&self, cfg: &WebDavConfig, path: &str, local: &Path, len: u64) -> Result<()> {
+            self.put_file_calls.set(self.put_file_calls.get() + 1);
+            // 内存实现无法真流式，但依然"按文件"读，并校验调用方给的长度，
+            // 保证生产实现拿到的是真实的字节数（流式 PUT 要带 Content-Length）。
+            let bytes = std::fs::read(local)?;
+            if bytes.len() as u64 != len {
+                return Err(Error::Other(format!(
+                    "put_file 长度不符：实际 {} 字节，声明 {len}",
+                    bytes.len()
+                )));
+            }
+            self.put_atomic(cfg, path, bytes)
+        }
+
+        fn get_to_file(&self, cfg: &WebDavConfig, path: &str, dest: &Path) -> Result<()> {
+            self.get_to_file_calls.set(self.get_to_file_calls.get() + 1);
+            let bytes = self.get_bytes(cfg, path)?;
+            std::fs::write(dest, &bytes)?;
             Ok(())
         }
     }
@@ -837,7 +922,7 @@ mod tests {
 
     #[test]
     fn cover_cross_end_transfer_and_idempotent() {
-        let dav = MemDav { store: RefCell::new(HashMap::new()) };
+        let dav = MemDav::new();
         let cfg = cfg();
         let cover = jpeg_cover();
         let hash = sha256_bytes(&cover);
@@ -914,7 +999,7 @@ mod tests {
 
     #[test]
     fn blob_cross_end_transfer_and_checksum_reject() {
-        let dav = MemDav { store: RefCell::new(HashMap::new()) };
+        let dav = MemDav::new();
         let cfg = cfg();
         let content = b"hello inksync book content".to_vec();
         let sha = sha256_bytes(&content);
@@ -975,6 +1060,74 @@ mod tests {
         assert!(!rep_bad.errors.is_empty(), "应记录校验错误");
     }
 
+    /// 流式路径守卫：书籍上传/下载**必须**走 `put_file` / `get_to_file`，
+    /// 而不是退回"整文件进内存"的 `put_atomic(Vec<u8>)` / `get_bytes`。
+    ///
+    /// 这是 Rust 侧对齐 Dart P1（避免大书 OOM）的回归锁：若有人把
+    /// `transfer_one_blob` 改回 `std::fs::read` + `put_atomic`，此测试立即挂。
+    #[test]
+    fn blob_transfer_uses_streaming_paths() {
+        let dav = MemDav::new();
+        let cfg = cfg();
+        // 用一份"不小"的书文件，才谈得上流式改造的意义
+        let content: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let sha = sha256_bytes(&content);
+
+        let a_file = std::env::temp_dir().join(format!("{sha}.epub"));
+        std::fs::write(&a_file, &content).unwrap();
+        let a_store = MemBlobStore { files: RefCell::new(HashMap::new()) };
+        a_store.files.borrow_mut().insert(sha.clone(), a_file.clone());
+
+        // 上传：应命中 put_file（且长度声明正确）
+        let mut rep_a = SyncReport::default();
+        transfer_blobs(
+            &dav,
+            &cfg,
+            "inksync",
+            &[BlobEntry { title: "大书".into(), sha256: sha.clone(), local_path: Some(a_file.clone()) }],
+            &a_store,
+            &mut rep_a,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(rep_a.uploaded_books, 1);
+        assert_eq!(dav.put_file_calls.get(), 1, "上传必须走流式 put_file，而非整文件读进内存");
+
+        // 下载：应命中 get_to_file，且落地字节 sha256 与原书一致
+        let b_store = MemBlobStore { files: RefCell::new(HashMap::new()) };
+        let mut rep_b = SyncReport::default();
+        let mut landed = PathBuf::new();
+        transfer_blobs(
+            &dav,
+            &cfg,
+            "inksync",
+            &[BlobEntry { title: "大书".into(), sha256: sha.clone(), local_path: None }],
+            &b_store,
+            &mut rep_b,
+            |_, p| landed = p.to_path_buf(),
+        )
+        .unwrap();
+        assert_eq!(rep_b.downloaded_books, 1);
+        assert_eq!(dav.get_to_file_calls.get(), 1, "下载必须走流式 get_to_file");
+        assert_eq!(crate::sha256_file(&landed).unwrap(), sha, "落地书文件 sha256 应与原书一致");
+
+        // 幂等：远端已有，二次上传不再走传输
+        let mut rep_a2 = SyncReport::default();
+        transfer_blobs(
+            &dav,
+            &cfg,
+            "inksync",
+            &[BlobEntry { title: "大书".into(), sha256: sha.clone(), local_path: Some(a_file.clone()) }],
+            &a_store,
+            &mut rep_a2,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(dav.put_file_calls.get(), 1, "幂等：不应重复上传");
+
+        let _ = std::fs::remove_file(&a_file);
+    }
+
     #[test]
     fn cover_ext_detection() {
         assert_eq!(cover_ext(&[0xFF, 0xD8, 0xFF, 0xE0]), ".jpg");
@@ -1008,7 +1161,7 @@ mod tests {
         assert_eq!(covers[0].title, "我的漫画");
 
         // 推到远端（MemDav 模拟 WebDAV）
-        let dav = MemDav { store: RefCell::new(HashMap::new()) };
+        let dav = MemDav::new();
         let cfg = cfg();
         let store = FsBlobStore::new(base.join("local_store"));
         let cover_store = FsCoverStore::new(base.join("local_store"));
@@ -1184,7 +1337,7 @@ mod tests {
         std::fs::write(books_dir.join("我的漫画.epub"), b"payload").unwrap();
         std::fs::write(covers_dir.join("我的漫画.jpg"), jpeg_cover()).unwrap();
 
-        let dav = MemDav { store: RefCell::new(HashMap::new()) };
+        let dav = MemDav::new();
         let cfg = cfg();
         let bs = FsBlobStore::new(store_dir.clone());
         let cs = FsCoverStore::new(store_dir.clone());
@@ -1212,7 +1365,7 @@ mod tests {
     /// `pull_remote` 把远端有、本地缺的拉回，且幂等。
     #[test]
     fn pull_remote_downloads_missing_and_idempotent() {
-        let dav = MemDav { store: RefCell::new(HashMap::new()) };
+        let dav = MemDav::new();
         let cfg = cfg();
         let base = std::env::temp_dir().join(format!("inksync_pull_{}", nanos()));
         let books_dir = base.join("books");

@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::Client;
@@ -246,6 +247,71 @@ impl WebDavClient {
         }
     }
 
+    /// 流式上传：请求体直接来自文件，**不把整份内容读进内存**。
+    ///
+    /// 这是大书（cbz / pdf 动辄几百 MB）不 OOM 的关键——`put` 接收 `Vec<u8>`，
+    /// 调用方必须先 `std::fs::read` 整文件，峰值内存 = 文件大小；而且 `put` 的重试
+    /// 闭包里还有 `body.clone()`，等于再来一份。
+    ///
+    /// 重试时无法复用同一个 `File`（流只能消费一次），所以每次尝试重新打开文件。
+    pub fn put_file(&self, cfg: &WebDavConfig, path: &str, local: &Path, len: u64) -> Result<()> {
+        retry(4, || {
+            let f = std::fs::File::open(local)?;
+            let resp = self
+                .req(cfg, Method::PUT, path)
+                .header(CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"))
+                // 显式带 Content-Length：部分 WebDAV 服务端对 chunked PUT 支持很差
+                .header("Content-Length", len.to_string())
+                .body(reqwest::blocking::Body::from(f))
+                .send()?;
+            let status = resp.status();
+            if !status.is_success() && status.as_u16() != 201 && status.as_u16() != 204 {
+                return Err(Error::Dav { status: status.as_u16(), message: status.to_string() });
+            }
+            Ok(())
+        })
+    }
+
+    /// 流式「原子」写入：PUT 临时名（流式）→ MOVE 正式名。
+    /// 与 [WebDavClient::put_atomic] 语义完全一致，只是请求体换成文件流。
+    pub fn put_file_atomic(
+        &self,
+        cfg: &WebDavConfig,
+        path: &str,
+        local: &Path,
+        len: u64,
+    ) -> Result<()> {
+        let tmp = format!("{path}.tmp-{}", tmp_suffix());
+        self.put_file(cfg, &tmp, local, len)?;
+        match self.rename(cfg, &tmp, path) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = self.delete(cfg, &tmp);
+                Err(e)
+            }
+        }
+    }
+
+    /// 流式下载：边收边写进 `dest`，峰值内存只有缓冲区大小（不攒成 `Vec<u8>`）。
+    ///
+    /// 刻意**不**校验 Content-Length：客户端开了 gzip（`Client::builder().gzip(true)`），
+    /// 声明长度是压缩后的，与实际落盘字节数对不上会误报。
+    /// 完整性交给调用方用 sha256 校验——更强，也能抓住传输截断。
+    ///
+    /// `reqwest::blocking::Response` 实现了 `std::io::Read`，故可直接 `io::copy` 落盘。
+    pub fn get_to_file(&self, cfg: &WebDavConfig, path: &str, dest: &Path) -> Result<()> {
+        retry(4, || {
+            let mut resp = self.req(cfg, Method::GET, path).send()?;
+            let status = resp.status();
+            if !status.is_success() {
+                return Err(Error::Dav { status: status.as_u16(), message: status.to_string() });
+            }
+            let mut out = std::fs::File::create(dest)?;
+            std::io::copy(&mut resp, &mut out)?;
+            Ok(())
+        })
+    }
+
     /// 递归创建目录；405 = 已存在，视为成功
     pub fn mkcol_all(&self, cfg: &WebDavConfig, path: &str) -> Result<()> {
         let parts: Vec<&str> = path.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
@@ -486,5 +552,13 @@ impl DavFs for WebDavClient {
 
     fn put_atomic(&self, cfg: &WebDavConfig, path: &str, body: Vec<u8>) -> Result<()> {
         WebDavClient::put_atomic(self, cfg, path, body)
+    }
+
+    fn put_file(&self, cfg: &WebDavConfig, path: &str, local: &Path, len: u64) -> Result<()> {
+        WebDavClient::put_file_atomic(self, cfg, path, local, len)
+    }
+
+    fn get_to_file(&self, cfg: &WebDavConfig, path: &str, dest: &Path) -> Result<()> {
+        WebDavClient::get_to_file(self, cfg, path, dest)
     }
 }
